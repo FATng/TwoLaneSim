@@ -1,98 +1,68 @@
-# TwoLaneSimulation (4 Làn Đường, Vạch Zebra Crossing & Người Đi Bộ - Unity 6)
+# TwoLaneSimulation - 4-Lane Bidirectional Traffic Simulation with Sentis AI
 
-Dự án mô phỏng môi trường giao thông **4 làn đường song song (2 làn trái, 2 làn phải)** với **hai luồng phương tiện chạy ngược chiều nhau**, tích hợp hệ thống **vạch kẻ đường cho người đi bộ (Zebra Crossing)** và **Người đi bộ tự động (Pedestrian Agent & Spawner)** với thuật toán điều khiển hardcode độc lập.
-
----
-
-## 1. Thiết kế Môi trường 4 Làn & Vạch kẻ Zebra Crossing
-
-### Mặt đường (FourLaneRoad)
-- **Cấu trúc 4 làn**: 2 làn bên trái và 2 làn bên phải nằm song song trên cùng một mặt phẳng.
-- **Không có vạch phân làn ở giữa**: Tim đường ($X = 0$) phẳng, đồng nhất, không có vạch kẻ tim đường hay dải phân cách cứng.
-- **Kích thước**:
-  - **Chiều rộng**: $16.0\text{ m}$ (mỗi làn rộng $4.0\text{ m}$, trải từ $X = -8.0\text{ m}$ đến $X = +8.0\text{ m}$).
-  - **Chiều dài**: $500\text{ m}$ ($Z \in [0, 500\text{ m}]$).
-- **Rào chắn 2 bên mép đường**: Tọa độ $X = -8.15\text{ m}$ và $X = +8.15\text{ m}$.
-
-### Vạch kẻ đường Zebra Crossing (An toàn tuyệt đối cho xe và Raycast)
-- **Vị trí thiết lập**: Bố trí tại 3 cụm qua đường chính trên cung đường 500m:
-  - Cụm 1: $Z = 120\text{ m}$
-  - Cụm 2: $Z = 250\text{ m}$ (ngay trung tâm đoạn đường)
-  - Cụm 3: $Z = 380\text{ m}$
-- **Quy cách hình học**: Mỗi lối qua đường rộng $4.0\text{ m}$ theo trục $Z$, gồm 13 vạch sơn trắng ($0.6\text{ m} \times 4.0\text{ m}$) đặt cách đều nhau trải suốt toàn bộ chiều rộng 16m của mặt đường.
-- **Đặc tính kỹ thuật bắt buộc**:
-  - **KHÔNG CÓ COLLIDER**: Toàn bộ các vạch kẻ đường hoàn toàn không gắn `BoxCollider` hay `MeshCollider`. Xe cộ chạy qua 100% mượt mà, không va chạm, không nảy sóc, không làm thay đổi trọng tâm vật lý của xe.
-  - **Layer 2 (`Ignore Raycast`)**: Thuộc Layer 2 mặc định của Unity, triệt tiêu hoàn toàn khả năng bị bắt hay phản hồi bởi bất kỳ tia `Physics.Raycast` nào từ cảm biến xe sau này.
+Mô phỏng giao thông thời gian thực trên Unity 6 (`6000.3.16f1`) gồm **4 làn đường song song, 2 nhóm làn chạy ngược chiều nhau**, tích hợp:
+- **Trí tuệ nhân tạo (AI Sentis ONNX)** dự đoán hành vi và điều khiển liên tục.
+- **Hệ thống vạch kẻ đường (Zebra Crossing)** không collider & Layer 2 (Ignore Raycast).
+- **Hệ thống người đi bộ (PedestrianAgent)** hardcode độc lập đi qua lại 2 chiều.
 
 ---
 
-## 2. Hệ thống Người đi bộ (Pedestrian Agent & Spawner)
+## 🛣️ 1. Cấu hình Hạ tầng & Làn đường (Road Geometry)
 
-Hệ thống điều khiển người đi bộ vận hành độc lập bằng **Hardcode logic** (không phụ thuộc vào bất kỳ hàm AI hay controller của xe):
-
-### `PedestrianAgent`
-- **Băng qua đường 2 chiều**:
-  - Hướng Trái $\rightarrow$ Phải ($+X$): Xuất phát từ lề trái ($X = -9.0\text{ m}$), hướng mặt góc $90^\circ$, đích đến $X \ge +9.2\text{ m}$.
-  - Hướng Phải $\rightarrow$ Trái ($-X$): Xuất phát từ lề phải ($X = +9.0\text{ m}$), hướng mặt góc $-90^\circ$, đích đến $X \le -9.2\text{ m}$.
-- **Hệ thống Cảm biến Raycast phía trước**:
-  - Bắn 5 tia quét góc quạt tầm xa $2.5\text{ m}$ phía trước mặt người đi bộ.
-  - **Nếu xe đang chạy** (vận tốc $\ge 0.5\text{ m/s}$): Người đi bộ chủ động dừng bước nhường đường cho xe qua trước.
-  - **Nếu xe dừng chắn đường** (vận tốc $< 0.5\text{ m/s}$): Người đi bộ kích hoạt chế độ đi vòng né qua đầu hoặc đuôi xe theo trục $Z$ để tiếp tục hành trình.
-- **Xử lý va chạm vật lý**:
-  - Khi có va chạm với xe, người đi bộ lập tức đổi sang màu **Đỏ rực** (`crashColor`), đứng yên trong vài giây, sau đó tự động tách khỏi đầu xe để tiếp tục di chuyển.
-- **Hoạt họa bước chân**:
-  - Tích hợp hiệu ứng bước đi nhấp nhô nhẹ (`stepBobAmplitude = 0.04m`) tự nhiên.
-  - Tự động hủy (`destroyOnArrival`) sau khi đã hoàn thành việc qua đường an toàn.
-
-### `PedestrianSpawner`
-- Được gắn trên GameObject `TrafficSystem`.
-- Tự động sinh người đi bộ định kỳ (chu kỳ $5 - 10$ giây).
-- Tỉ lệ $50\%$ xuất phát từ lề trái và $50\%$ xuất phát từ lề phải.
-- Ưu tiên $75\%$ xuất hiện tại các vạch kẻ Zebra Crossing ($Z = 120, 250, 380\text{ m}$).
-- Trang phục ngẫu nhiên với bảng màu đa dạng.
+* **Kích thước lòng đường**: Rộng **16.0m** ($X \in [-8.0\text{ m}, +8.0\text{ m}]$), Dài **500m** ($Z \in [0, 500\text{ m}]$).
+* **Tim đường ($X = 0$)**: Hoàn toàn bằng phẳng, không có rào cản vật lý hay vạch kẻ chia cắt giữa hai chiều xe.
+* **4 Làn xe được phân chia đối xứng**:
+  1. **Làn 0 (Trái - Ngoài cùng)**: $X = -6.0\text{ m}$, xe chạy theo hướng **$-Z$** (Xoay $180^\circ$, `Car_Reverse`).
+  2. **Làn 1 (Trái - Trong cùng)**: $X = -2.0\text{ m}$, xe chạy theo hướng **$-Z$** (Xoay $180^\circ$, `Car_Reverse`).
+  3. **Làn 2 (Phải - Trong cùng)**: $X = +2.0\text{ m}$, xe chạy theo hướng **$+Z$** (Xoay $0^\circ$, `Car_Forward`).
+  4. **Làn 3 (Phải - Ngoài cùng)**: $X = +6.0\text{ m}$, xe chạy theo hướng **$+Z$** (Xoay $0^\circ$, `Car_Forward`).
+* **Rào chắn 2 bên đường (Guardrails)**: Đặt tại $X = \pm 8.15\text{ m}$ cao $1.2\text{ m}$ dọc tuyến đường 500m.
 
 ---
 
-## 3. Cấu trúc Thư mục Dự án
+## 🧠 2. Tích hợp Mô hình AI (Unity Sentis Inference)
 
-```text
-TwoLaneSimulation/
-├── Assets/
-│   ├── Materials/
-│   │   ├── RoadMaterial.mat            # Mặt đường nhựa asphalt
-│   │   ├── GuardrailMaterial.mat       # Rào chắn kim loại
-│   │   ├── ZebraCrossingMaterial.mat   # Vạch sơn trắng Zebra Crossing
-│   │   ├── PedestrianMaterial.mat      # Vật liệu người đi bộ
-│   │   ├── CarBody_Forward.mat         # Thân xe làn tiến (+Z, Xanh Cyan)
-│   │   ├── CarBody_Reverse.mat         # Thân xe làn ngược (-Z, Cam Đỏ)
-│   │   ├── CarBody_Default.mat         # Thân xe trung tính (Trắng bạc)
-│   │   ├── TailLightMaterial.mat       # Đèn hậu đỏ phát quang
-│   │   └── HeadLightMaterial.mat       # Đèn pha trước phát quang
-│   ├── Prefabs/
-│   │   ├── Car_Forward.prefab          # Prefab xe làn tiến (+Z)
-│   │   ├── Car_Reverse.prefab          # Prefab xe làn ngược (-Z)
-│   │   ├── Car_Neutral.prefab          # Prefab xe trung tính
-│   │   └── Pedestrian.prefab           # Prefab người đi bộ (Collider + Agent)
-│   ├── Scenes/
-│   │   └── TwoLaneSimulationScene.unity# Scene đầy đủ 4 làn, 3 cụm Zebra, 28 xe & người qua đường
-│   └── Scripts/
-│       ├── PedestrianAgent.cs          # Logic hardcode điều khiển người đi bộ qua đường
-│       ├── PedestrianSpawner.cs        # Trình sinh người qua đường tự động 2 chiều
-│       └── Editor/
-│           └── EnvironmentSetup.cs     # Tool Editor dựng Scene & Prefabs tự động
-├── Packages/
-│   └── manifest.json
-├── ProjectSettings/
-└── README.md
-```
+Dự án nạp mô hình mạng nơ-ron sâu đa nhiệm [`Assets/Models/traffic_aif_agent.onnx`](Assets/Models/traffic_aif_agent.onnx) thông qua **Unity Sentis 2.1.3**.
+
+### 9 Đầu vào Quan sát (Input Tensor `[1, 9]`):
+1. `normSpeed`: Vận tốc hiện tại của xe ($v / 30.0$, kẹp trong $[0.0, 1.0]$).
+2. `normGap`: Cự ly tới vật cản phía trước ($d / 50.0$, kẹp trong $[0.0, 1.0]$).
+3. `normRelSpeed`: Vận tốc tương đối với vật cản ($\Delta v / 15.0$, kẹp trong $[-1.0, 1.0]$).
+4. `speedError`: Sai số vận tốc $((v_{\text{target}} - v) / v_{\text{target}}$, kẹp trong $[-1.0, 1.0]$).
+5. `normRoadOffset`: Độ lệch vị trí so với tim phần đường riêng của xe ($[-1.0, 1.0]$).
+6. `sideBalance`: Cân bằng cự ly hai bên sườn ($(distRight - distLeft) / 5.0$, kẹp trong $[-1.0, 1.0]$).
+7. `isLeaderBraking`: Đèn phanh xe dẫn đầu ($1.0$ nếu đang phanh, $0.0$ nếu không).
+8. `pedestrianDetected`: Nhận diện người đi bộ phía trước ($1.0$ nếu có, $0.0$ nếu không).
+9. `trafficDensity`: Mật độ giao thông thời gian thực từ `TrafficFieldManager` ($[0.0, 1.0]$).
+
+### 7 Đầu ra Chính sách (Output Tensor `[1, 7]`):
+* **Tầng 1 - Quyết định hành vi bậc cao (High-Level DrivingMode - `argmax[0..4]`)**:
+  - `0 - FreeFlow`: Chạy tự do, duy trì vận tốc ổn định.
+  - `1 - CarFollowing`: Bám đuôi xe trước ở cự ly an toàn.
+  - `2 - ActiveEvasion`: Lách né xe dừng hoặc người đi bộ sang khoảng trống bên cạnh.
+  - `3 - SafeYielding`: Dừng hoặc giảm tốc nhường đường cho người qua đường.
+  - `4 - EmergencyShield`: Phanh khẩn cấp & bảo hiểm chống va chạm.
+* **Tầng 2 - Chấp hành điều khiển liên tục (Continuous Control)**:
+  - `Output[5]`: Gia tốc chuẩn hóa $[-1.0, 1.0] \rightarrow a = \text{Output}[5] \times 8.0\text{ m/s}^2$.
+  - `Output[6]`: Góc bẻ lái chuẩn hóa $[-1.0, 1.0] \rightarrow \text{steer} = \text{Output}[6] \times 0.45\text{ rad}$.
 
 ---
 
-## 4. Kiểm tra trong Unity Editor
+## 🚸 3. Vạch kẻ đường Zebra Crossing & Người đi bộ
 
-1. Mở Scene: [`Assets/Scenes/TwoLaneSimulationScene.unity`](file:///E:/Unity%20Prj/TwoLaneSimulation/Assets/Scenes/TwoLaneSimulationScene.unity).
-2. Nhấn nút **Play** trong Unity Editor:
-   - Các người đi bộ mẫu tại các vạch Zebra Crossing sẽ tự động bước qua đường từ cả 2 bên lề.
-   - Khi gặp xe chắn ngang, người đi bộ sẽ tự động dừng bước chờ hoặc né vòng qua xe.
-   - `PedestrianSpawner` sẽ tự động sinh thêm người đi bộ mới định kỳ.
-3. Vạch kẻ đường Zebra Crossing hoàn toàn không có Collider và thuộc Layer `Ignore Raycast`.
+* **Zebra Crossing**:
+  - Bố trí tại 3 cụm nút giao: $Z = 120\text{m}, 250\text{m}, 380\text{m}$.
+  - Mỗi cụm gồm 15 vạch trắng song song kích thước $0.5\text{m} \times 0.002\text{m} \times 4.0\text{m}$.
+  - **Không có Collider**: Xe chạy qua hoàn toàn phẳng, không gây rung lắc vật lý.
+  - **Layer 2 (`Ignore Raycast`)**: Cảm biến Raycast của xe bỏ qua hoàn toàn vạch kẻ này.
+* **Người đi bộ (PedestrianAgent & PedestrianSpawner)**:
+  - Hardcode độc lập, sang đường từ cả 2 bên (Trái $\to$ Phải và Phải $\to$ Trái).
+  - Hệ thống 5 tia quét xe, tự dừng nhường khi có xe lao tới gần, né vòng xe chết máy và đổi đỏ khi va chạm.
+
+---
+
+## 🚗 4. Cơ chế Sinh xe & Quản lý Luồng giao thông (TrafficSpawner)
+
+* **Tự động sinh 24-28 xe** trải đều trên 4 làn với thuật toán `ResolveOverlap` ngăn chặn hoàn toàn va chạm lúc xuất phát.
+* **Tính cách tài xế (Hurry Factor)**: Phân hóa ngẫu nhiên $0.75\times \dots 1.35\times$ tốc độ và độ bám sát.
+* **Cảnh báo va chạm**: Thân xe tự động chuyển sang màu đỏ rực khi có va chạm với xe khác hoặc rào chắn (`CarCollisionVisualizer`), đồng thời kích hoạt đèn phanh đỏ (`CarLightsController`).
