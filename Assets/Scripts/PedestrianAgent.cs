@@ -1,0 +1,441 @@
+using UnityEngine;
+
+namespace TwoLaneSimulation
+{
+    /// <summary>
+    /// Điều khiển hành vi người đi bộ qua đường (dạng khối chữ nhật) bằng Hardcode logic:
+    /// - Di chuyển ngang qua lòng đường (trục X) từ lề này sang lề đối diện (hỗ trợ cả 2 hướng trái -> phải và phải -> trái).
+    /// - Raycast phía trước phát hiện xe: nếu xe đang chạy thì dừng lại nhường đường, nếu xe dừng chắn thì đi vòng né qua xe.
+    /// - Khi va chạm với xe: chuyển sang màu đỏ rực, dừng lại trong vài giây rồi tách khỏi xe tiếp tục đi.
+    /// - Tự động hủy khi đã sang đường an toàn.
+    /// </summary>
+    [RequireComponent(typeof(Collider))]
+    public class PedestrianAgent : MonoBehaviour
+    {
+        [Header("Crossing Settings")]
+        [Tooltip("Tốc độ đi bộ (m/s), thường từ 1.2m/s đến 1.8m/s (~4.5 - 6.5 km/h)")]
+        public float walkingSpeed = 1.4f;
+
+        [Tooltip("Hướng di chuyển theo trục X (+1: từ trái sang phải, -1: từ phải sang trái)")]
+        public int crossingDirection = 1;
+
+        [Tooltip("Độ rộng mặt đường (m)")]
+        public float roadWidth = 16f;
+
+        [Tooltip("Tọa độ X đích đến sau khi băng qua đường")]
+        public float targetX = 9.2f;
+
+        [Tooltip("Tự động hủy GameObject sau khi qua đường an toàn")]
+        public bool destroyOnArrival = true;
+
+        [Header("Vehicle Detection Raycast (Tránh đâm vào xe)")]
+        [Tooltip("Khoảng cách quét xe phía trước mặt người đi bộ (m)")]
+        public float vehicleLookAheadDistance = 2.5f;
+
+        [Tooltip("Trạng thái đang dừng chờ xe vượt qua")]
+        [SerializeField] private bool isYieldingToVehicle = false;
+
+        [Header("Detour / Bypass Settings (Né vòng qua xe dừng)")]
+        [Tooltip("Tốc độ dịch ngang (trục Z) khi đi vòng qua xe dừng chắn đường (m/s)")]
+        public float detourSpeed = 1.2f;
+
+        [Tooltip("Trạng thái đang dịch trái/phải để vượt qua xe dừng")]
+        [SerializeField] private bool isDetouring = false;
+
+        [Header("Crash / Collision Reaction (Tô đỏ và dừng lại)")]
+        [Tooltip("Thời gian đứng yên sau khi va chạm với xe (giây)")]
+        public float crashPauseDuration = 3.0f;
+
+        [Tooltip("Màu cảnh báo khi bị đâm va (Đỏ rực)")]
+        public Color crashColor = new Color(1.0f, 0.05f, 0.05f, 1f);
+
+        [SerializeField] private bool isInCrashState = false;
+
+        [Header("Visual Animation (Procedural Bobbing)")]
+        [Tooltip("Tần số bước chân (chu kỳ bước/giây)")]
+        public float stepFrequency = 4.0f;
+
+        [Tooltip("Biên độ nhấp nhô bước chân (m)")]
+        public float stepBobAmplitude = 0.04f;
+
+        [Header("State")]
+        [SerializeField] private bool hasCompletedCrossing = false;
+
+        private float _baseHeightY = 0.9f;
+        private float _startZ = 0f;
+        private float _walkTimer = 0f;
+        private float _crashTimer = 0f;
+        private float _postCrashGraceTimer = 0f;
+        private float _detourTimer = 0f;
+        private float _detourDirectionZ = 0f;
+        private GameObject _lastCollidedVehicle = null;
+        private Rigidbody _rb;
+        private Renderer _renderer;
+        private MaterialPropertyBlock _propBlock;
+        private Color _normalColor = new Color(0.95f, 0.72f, 0.12f, 1f);
+
+        public bool HasCompletedCrossing => hasCompletedCrossing;
+        public bool IsYieldingToVehicle => isYieldingToVehicle;
+        public bool IsDetouring => isDetouring;
+        public bool IsInCrashState => isInCrashState;
+
+        private void Awake()
+        {
+            _rb = GetComponent<Rigidbody>();
+            if (_rb != null)
+            {
+                _rb.useGravity = false;
+                _rb.isKinematic = true;
+            }
+
+            // Gán PhysicsMaterial triệt tiêu ma sát (zero friction) để người không bao giờ bị bám dính hay kéo theo xe
+            Collider col = GetComponent<Collider>();
+            if (col != null)
+            {
+                PhysicsMaterial zeroFric = new PhysicsMaterial("PedestrianZeroFriction")
+                {
+                    dynamicFriction = 0f,
+                    staticFriction = 0f,
+                    bounciness = 0f,
+                    frictionCombine = PhysicsMaterialCombine.Minimum,
+                    bounceCombine = PhysicsMaterialCombine.Minimum
+                };
+                col.material = zeroFric;
+            }
+
+            _renderer = GetComponent<Renderer>();
+            _propBlock = new MaterialPropertyBlock();
+
+            if (!CompareTag("Pedestrian"))
+            {
+                gameObject.tag = "Pedestrian";
+            }
+        }
+
+        private void Start()
+        {
+            _baseHeightY = transform.position.y;
+            _startZ = transform.position.z;
+            if (_baseHeightY < 0.1f) _baseHeightY = 0.9f;
+            UpdateFacingRotation();
+        }
+
+        /// <summary>
+        /// Khởi tạo thông số người qua đường khi spawn
+        /// </summary>
+        public void Initialize(Vector3 startPos, int direction, float speed, float width)
+        {
+            transform.position = startPos;
+            crossingDirection = (direction >= 0) ? 1 : -1;
+            walkingSpeed = speed;
+            roadWidth = width;
+            targetX = (crossingDirection > 0) ? (roadWidth * 0.5f + 1.2f) : (-roadWidth * 0.5f - 1.2f);
+            _baseHeightY = startPos.y;
+            _startZ = startPos.z;
+            if (_baseHeightY < 0.1f) _baseHeightY = 0.9f;
+            hasCompletedCrossing = false;
+            isInCrashState = false;
+            isDetouring = false;
+            _detourTimer = 0f;
+            _crashTimer = 0f;
+            UpdateFacingRotation();
+        }
+
+        private void UpdateFacingRotation()
+        {
+            float yaw = (crossingDirection > 0) ? 90f : -90f;
+            transform.rotation = Quaternion.Euler(0f, yaw, 0f);
+        }
+
+        private void Update()
+        {
+            if (hasCompletedCrossing) return;
+
+            float dt = Time.deltaTime;
+
+            // 1. Xử lý trạng thái va chạm (Tô đỏ và đứng yên)
+            if (isInCrashState)
+            {
+                _crashTimer -= dt;
+                if (_crashTimer <= 0f)
+                {
+                    isInCrashState = false;
+                    ApplyColor(_normalColor); // Khôi phục màu ban đầu
+
+                    // Sau khoảng chờ: Dời người dạt sang hướng qua đường để thoát khỏi đầu xe
+                    Vector3 sepPos = transform.position;
+                    sepPos.x += crossingDirection * 1.8f;
+
+                    if (_lastCollidedVehicle != null)
+                    {
+                        float dz = transform.position.z - _lastCollidedVehicle.transform.position.z;
+                        float zDir = (dz >= 0f) ? 1.0f : -1.0f;
+                        sepPos.z += zDir * 1.5f;
+                    }
+                    else
+                    {
+                        sepPos.z += 1.2f;
+                    }
+
+                    transform.position = sepPos;
+                    _postCrashGraceTimer = 3.0f;
+                }
+                return;
+            }
+
+            if (_postCrashGraceTimer > 0f)
+            {
+                _postCrashGraceTimer -= dt;
+            }
+
+            // 2. Dò quét xe phía trước mặt bằng Raycast
+            if (_postCrashGraceTimer <= 0f)
+            {
+                bool hasVehicleAhead = ScanForVehicles(out bool isStoppedCar, out GameObject carObj, out float hitDist);
+
+                if (hasVehicleAhead)
+                {
+                    if (!isStoppedCar)
+                    {
+                        // XE ĐANG CHẠY: Dừng lại nhường đường an toàn
+                        isYieldingToVehicle = true;
+                        isDetouring = false;
+                        _detourTimer = 0f;
+                        return;
+                    }
+                    else
+                    {
+                        // XE ĐÃ DỪNG LẠI: Cho phép người đi bộ tiếp tục hoặc lách né vòng qua xe
+                        isYieldingToVehicle = false;
+
+                        if (carObj != null)
+                        {
+                            IgnoreCollisionWithVehicle(carObj, 2.5f);
+                        }
+
+                        if (hitDist <= 1.5f)
+                        {
+                            isDetouring = true;
+                            _detourTimer = 0.9f;
+                            float carCenterZ = carObj.transform.position.z;
+                            _detourDirectionZ = (transform.position.z >= carCenterZ) ? 1.0f : -1.0f;
+                        }
+                        else
+                        {
+                            if (_detourTimer <= 0f) isDetouring = false;
+                        }
+                    }
+                }
+                else
+                {
+                    isYieldingToVehicle = false;
+                    if (_detourTimer <= 0f) isDetouring = false;
+                }
+            }
+            else
+            {
+                isYieldingToVehicle = false;
+                if (_detourTimer <= 0f) isDetouring = false;
+            }
+
+            // 3. Di chuyển người đi bộ
+            _walkTimer += dt;
+            Vector3 pos = transform.position;
+
+            // Bước ngang qua đường (trục X)
+            pos.x += crossingDirection * walkingSpeed * dt;
+
+            // Dịch tránh chướng ngại vật (trục Z) khi đi vòng qua xe dừng
+            if (_detourTimer > 0f)
+            {
+                _detourTimer -= dt;
+                pos.z += _detourDirectionZ * detourSpeed * dt;
+            }
+            else
+            {
+                isDetouring = false;
+                if (Mathf.Abs(pos.z - _startZ) > 0.05f)
+                {
+                    pos.z = Mathf.MoveTowards(pos.z, _startZ, detourSpeed * 0.4f * dt);
+                }
+            }
+
+            // 4. Hiệu ứng nhấp nhô mô phỏng nhịp bước chân
+            float bobOffset = Mathf.Sin(_walkTimer * stepFrequency * Mathf.PI) * stepBobAmplitude;
+            pos.y = _baseHeightY + Mathf.Abs(bobOffset);
+
+            transform.position = pos;
+
+            // 5. Kiểm tra đến đích (vượt qua mép đường bên kia)
+            bool reached = (crossingDirection > 0 && pos.x >= targetX) ||
+                           (crossingDirection < 0 && pos.x <= targetX);
+
+            if (reached)
+            {
+                hasCompletedCrossing = true;
+                if (destroyOnArrival)
+                {
+                    Destroy(gameObject, 1.5f);
+                }
+            }
+        }
+
+        /// <summary>
+        /// Bắn 5 tia Raycast hình quạt để phát hiện xe ô tô cắt ngang
+        /// </summary>
+        private bool ScanForVehicles(out bool isStoppedCar, out GameObject detectedCar, out float hitDist)
+        {
+            isStoppedCar = false;
+            detectedCar = null;
+            hitDist = 50f;
+
+            Vector3 forwardDir = transform.forward;
+            Vector3 originCenter = transform.position;
+            originCenter.y = 0.6f;
+
+            float[] angles = new float[] { 0f, 10f, -10f, 20f, -20f };
+
+            for (int i = 0; i < angles.Length; i++)
+            {
+                Vector3 rayDir = Quaternion.Euler(0, angles[i], 0) * forwardDir;
+                if (Physics.Raycast(originCenter, rayDir, out RaycastHit hit, vehicleLookAheadDistance))
+                {
+                    if (hit.collider.gameObject != gameObject)
+                    {
+                        if (hit.collider.CompareTag("Vehicle") || hit.collider.GetComponentInParent<Rigidbody>() != null)
+                        {
+                            if (hit.distance < hitDist)
+                            {
+                                hitDist = hit.distance;
+                                detectedCar = hit.collider.gameObject;
+                            }
+                        }
+                    }
+                }
+            }
+
+            if (detectedCar != null)
+            {
+                float carSpeed = 0f;
+                var rb = detectedCar.GetComponentInParent<Rigidbody>();
+                if (rb != null)
+                {
+                    carSpeed = rb.linearVelocity.magnitude;
+                }
+
+                // Xe chạy chậm hoặc đã dừng (< 0.5 m/s)
+                if (carSpeed < 0.5f)
+                {
+                    isStoppedCar = true;
+                }
+
+                return true;
+            }
+
+            return false;
+        }
+
+        private void OnDrawGizmosSelected()
+        {
+            Vector3 forwardDir = transform.forward;
+            Vector3 originCenter = transform.position;
+            originCenter.y = 0.6f;
+
+            Gizmos.color = isYieldingToVehicle ? Color.red : (isDetouring ? Color.magenta : Color.green);
+            float[] angles = new float[] { 0f, 10f, -10f, 20f, -20f };
+            for (int i = 0; i < angles.Length; i++)
+            {
+                Vector3 rayDir = Quaternion.Euler(0, angles[i], 0) * forwardDir;
+                Gizmos.DrawRay(originCenter, rayDir * vehicleLookAheadDistance);
+            }
+        }
+
+        public void TriggerCrash(float pauseDuration = 3.0f, GameObject vehicle = null)
+        {
+            isInCrashState = true;
+            _crashTimer = pauseDuration;
+            if (vehicle != null)
+            {
+                _lastCollidedVehicle = vehicle;
+                IgnoreCollisionWithVehicle(vehicle, pauseDuration + 3.0f);
+            }
+            ApplyColor(crashColor);
+        }
+
+        public void SetRandomColor(Color bodyColor)
+        {
+            _normalColor = bodyColor;
+            if (!isInCrashState)
+            {
+                ApplyColor(_normalColor);
+            }
+        }
+
+        private void ApplyColor(Color c)
+        {
+            if (_renderer == null) _renderer = GetComponent<Renderer>();
+            if (_renderer != null)
+            {
+                _renderer.GetPropertyBlock(_propBlock);
+                _propBlock.SetColor("_Color", c);
+                _propBlock.SetColor("_BaseColor", c);
+                _renderer.SetPropertyBlock(_propBlock);
+            }
+        }
+
+        private void OnCollisionEnter(Collision collision)
+        {
+            HandleVehicleCollision(collision.gameObject);
+        }
+
+        private void OnTriggerEnter(Collider other)
+        {
+            HandleVehicleCollision(other.gameObject);
+        }
+
+        private void HandleVehicleCollision(GameObject other)
+        {
+            if (_postCrashGraceTimer > 0f) return;
+
+            if (other.CompareTag("Vehicle") || other.GetComponentInParent<Rigidbody>() != null)
+            {
+                IgnoreCollisionWithVehicle(other, crashPauseDuration + 3.0f);
+                TriggerCrash(crashPauseDuration, other);
+            }
+        }
+
+        public void IgnoreCollisionWithVehicle(GameObject vehicleObj, float duration)
+        {
+            if (vehicleObj == null) return;
+            StartCoroutine(IgnoreCollisionRoutine(vehicleObj, duration));
+        }
+
+        private System.Collections.IEnumerator IgnoreCollisionRoutine(GameObject vehicleObj, float duration)
+        {
+            if (vehicleObj == null) yield break;
+            Collider[] myCols = GetComponentsInChildren<Collider>();
+            Collider[] otherCols = vehicleObj.GetComponentsInChildren<Collider>();
+
+            foreach (var m in myCols)
+            {
+                foreach (var o in otherCols)
+                {
+                    if (m != null && o != null) Physics.IgnoreCollision(m, o, true);
+                }
+            }
+
+            yield return new WaitForSeconds(duration);
+
+            if (vehicleObj != null)
+            {
+                foreach (var m in myCols)
+                {
+                    foreach (var o in otherCols)
+                    {
+                        if (m != null && o != null) Physics.IgnoreCollision(m, o, false);
+                    }
+                }
+            }
+        }
+    }
+}
