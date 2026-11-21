@@ -1,83 +1,167 @@
-# TwoLaneSimulation - 4-Lane Bidirectional Traffic Simulation with Sentis AI
+# TwoLaneSimulation - Hệ Thống Mô Phỏng Giao Thông 4 Làn Hai Chiều Tích Hợp Trí Tuệ Nhân Tạo Sentis
 
-Mô phỏng giao thông thời gian thực trên Unity 6 (`6000.3.16f1`) gồm **4 làn đường song song, 2 nhóm làn chạy ngược chiều nhau**, tích hợp:
-- **Trí tuệ nhân tạo (AI Sentis ONNX)** dự đoán hành vi và điều khiển liên tục.
-- **Hệ thống vạch kẻ đường (Zebra Crossing)** không collider & Layer 2 (Ignore Raycast).
-- **Hệ thống người đi bộ (PedestrianAgent)** hardcode độc lập đi qua lại 2 chiều.
+Hệ thống mô phỏng giao thông thời gian thực trên nền tảng Unity 6 với cấu hình đường 4 làn song song chạy theo hai chiều ngược nhau. Dự án tích hợp các mô hình mạng nơ-ron sâu đa nhánh (Multi-Head Neural Network) được huấn luyện độc lập qua PyTorch và nhúng trực tiếp vào Unity thông qua bộ máy suy luận thời gian thực (Inference Engine) Unity Sentis.
 
 ---
 
-## 🛣️ 1. Cấu hình Hạ tầng & Làn đường (Road Geometry)
+## 1. Tổng Quan Kiến Trúc Mô Hình Trí Tuệ Nhân Tạo
 
-* **Kích thước lòng đường**: Rộng **16.0m** ($X \in [-8.0\text{ m}, +8.0\text{ m}]$), Dài **500m** ($Z \in [0, 500\text{ m}]$).
-* **Tim đường ($X = 0$)**: Hoàn toàn bằng phẳng, không có rào cản vật lý hay vạch kẻ chia cắt giữa hai chiều xe.
-* **4 Làn xe được phân chia đối xứng**:
-  1. **Làn 0 (Trái - Ngoài cùng)**: $X = -6.0\text{ m}$, xe chạy theo hướng **$-Z$** (Xoay $180^\circ$, `Car_Reverse`).
-  2. **Làn 1 (Trái - Trong cùng)**: $X = -2.0\text{ m}$, xe chạy theo hướng **$-Z$** (Xoay $180^\circ$, `Car_Reverse`).
-  3. **Làn 2 (Phải - Trong cùng)**: $X = +2.0\text{ m}$, xe chạy theo hướng **$+Z$** (Xoay $0^\circ$, `Car_Forward`).
-  4. **Làn 3 (Phải - Ngoài cùng)**: $X = +6.0\text{ m}$, xe chạy theo hướng **$+Z$** (Xoay $0^\circ$, `Car_Forward`).
-* **Rào chắn 2 bên đường (Guardrails)**: Đặt tại $X = \pm 8.15\text{ m}$ cao $1.2\text{ m}$ dọc tuyến đường 500m.
+Dự án sử dụng hai mô hình mạng nơ-ron sâu chuyên biệt được lưu trữ dưới định dạng ONNX (Open Neural Network Exchange):
+* Mô hình dành cho ô tô: `Assets/Models/traffic_aif_agent.onnx`
+* Mô hình dành cho xe máy: `Assets/Models/traffic_motorcycle_agent.onnx`
 
----
+### 1.1. Cấu Trúc Mạng Nơ-ron Đa Nhánh
 
-## 🧠 2. Tích hợp Mô hình AI (Unity Sentis Inference)
+Cả hai mô hình đều kế thừa kiến trúc mạng nơ-ron sâu phân tầng gồm ba thành phần chính:
+* Khối tầng ẩn dùng chung: Tiếp nhận véc-tơ đầu vào 13 chiều, xử lý qua hai tầng tuyến tính liên tiếp kích thước 96 nút mạng cùng hàm kích hoạt phi tuyến ReLU.
+* Nhánh phân loại quyết định hành vi: Tiếp nhận đặc trưng từ khối tầng ẩn, đưa ra điểm số xác suất cho 8 trạng thái hành vi lái xe bậc cao thông qua hàm tuyến tính 96 về 8.
+* Nhánh điều khiển liên tục: Đưa ra 2 giá trị điều khiển vật lý gồm gia tốc và góc đánh lái chuẩn hóa trong khoảng từ -1.0 đến +1.0 thông qua hàm Tanh.
 
-Dự án nạp mô hình mạng nơ-ron sâu đa nhiệm [`Assets/Models/traffic_aif_agent.onnx`](Assets/Models/traffic_aif_agent.onnx) thông qua **Unity Sentis 2.1.3**, hỗ trợ đầy đủ các hành vi: vượt xe ngược chiều, **tự động hủy chuyển làn (AbortLaneChange)** chống kẹt góc và **bò nhích tới (CreepForward)** giải tỏa ùn tắc dòng xe do AI model hoàn toàn quyết định.
+Tổng véc-tơ đầu ra của mạng gồm 10 giá trị, ghép nối giữa 8 điểm số hành vi và 2 giá trị điều khiển liên tục.
 
-### 13 Đầu vào Quan sát (Input Tensor `[1, 13]`):
-1. `normSpeed`: Vận tốc hiện tại của xe ($v / 30.0$, kẹp trong $[0.0, 1.0]$).
-2. `normGap`: Cự ly tới vật cản phía trước ($d / 50.0$, kẹp trong $[0.0, 1.0]$).
-3. `normRelSpeed`: Vận tốc tương đối với vật cản ($\Delta v / 15.0$, kẹp trong $[-1.0, 1.0]$).
-4. `speedError`: Sai số vận tốc $((v_{\text{target}} - v) / v_{\text{target}}$, kẹp trong $[-1.0, 1.0]$).
-5. `normRoadOffset`: Độ lệch vị trí so với tim phần đường riêng của xe ($[-1.0, 1.0]$).
-6. `sideBalance`: Cân bằng cự ly hai bên sườn ($(distRight - distLeft) / 5.0$, kẹp trong $[-1.0, 1.0]$).
-7. `isLeaderBraking`: Đèn phanh xe dẫn đầu ($1.0$ nếu đang phanh, $0.0$ nếu không).
-8. `pedestrianDetected`: Nhận diện người đi bộ phía trước ($1.0$ nếu có, $0.0$ nếu không).
-9. `trafficDensity`: Mật độ giao thông thời gian thực từ `TrafficFieldManager` ($[0.0, 1.0]$).
-10. `oppositeClearGap`: Cự ly an toàn của làn ngược chiều kế bên ($d_{\text{opp}} / 50.0$, kẹp trong $[0.0, 1.0]$).
-11. `isOvertakingOpposite`: Trạng thái đang vượt trên làn ngược chiều ($1.0$ nếu đang trên làn ngược chiều, $0.0$ nếu ở làn nhà).
-12. `isChangingLane`: Trạng thái đang chuyển làn ($1.0$ nếu đang trong quá trình chuyển làn, $0.0$ nếu đang bám làn).
-13. `adjacentClearGap`: Khoảng trống an toàn của làn bên cạnh dự định chuyển tới ($[0.0, 1.0]$).
+### 1.2. 13 Biến Quan Sát Đầu Vào
 
-### 10 Đầu ra Chính sách (Output Tensor `[1, 10]`):
-* **Tầng 1 - Quyết định hành vi bậc cao (High-Level DrivingMode - `argmax[0..7]`)**:
-  - `0 - FreeFlow`: Chạy tự do, duy trì vận tốc ổn định.
-  - `1 - CarFollowing`: Bám đuôi xe trước ở cự ly an toàn.
-  - `2 - ActiveEvasion`: Chủ động đổi làn né xe dừng/chậm cùng chiều.
-  - `3 - SafeYielding`: Dừng hoặc giảm tốc nhường đường cho người qua đường.
-  - `4 - EmergencyShield`: Phanh khẩn cấp & bảo hiểm chống va chạm trực diện.
-  - `5 - OppositeOvertake`: Vượt sang làn ngược chiều khi làn hiện tại đông/tắc và làn đối diện thông thoáng.
-  - `6 - AbortLaneChange`: **HỦY chuyển làn** do AI quyết định khi làn bên cạnh bị kẹt hoặc vận tốc bị khựng, tự động bẻ lái căn thẳng xe trở lại tim làn cũ để triệt tiêu góc nghiêng, không nằm chéo chặn 2 làn đường.
-  - `7 - CreepForward`: **Tự bò nhích tới** ($1.5 - 2.5\text{ m/s}$) do AI quyết định khi xe trước nhích lên hoặc có khoảng trống an toàn nhỏ, giải tỏa dòng xe và ngăn chặn hiện tượng đóng băng nối đuôi.
-* **Tầng 2 - Chấp hành điều khiển liên tục (Continuous Control)**:
-  - `Output[8]`: Gia tốc chuẩn hóa $[-1.0, 1.0] \rightarrow a = \text{Output}[8] \times 8.0\text{ m/s}^2$.
-  - `Output[9]`: Góc bẻ lái chuẩn hóa $[-1.0, 1.0] \rightarrow \text{steer} = \text{Output}[9] \times 0.45\text{ rad}$.
+Mỗi phương tiện thu thập trạng thái môi trường xung quanh tại mỗi bước thời gian để tạo thành véc-tơ đầu vào kích thước 13 phần tử:
+1. `normSpeed`: Vận tốc hiện tại của xe, chuẩn hóa bằng cách chia cho 30.0 và giới hạn trong đoạn 0.0 đến 1.0.
+2. `normGap`: Cự ly tới vật cản gần nhất phía trước, chuẩn hóa bằng cách chia cho 50.0 và giới hạn trong đoạn 0.0 đến 1.0.
+3. `normRelSpeed`: Vận tốc tương đối giữa xe đang xét và xe phía trước, chuẩn hóa bằng cách chia cho 15.0 và giới hạn trong đoạn -1.0 đến 1.0.
+4. `speedError`: Sai số giữa vận tốc mục tiêu và vận tốc thực tế, chuẩn hóa trong đoạn -1.0 đến 1.0.
+5. `normRoadOffset`: Độ lệch vị trí phương tiện so với tim phần đường quy định của chiều chạy, giá trị từ -1.0 đến 1.0.
+6. `sideBalance`: Cân bằng cự ly hai bên sườn xe, tính bằng hiệu khoảng trống bên phải trừ bên trái chia cho 5.0, giá trị từ -1.0 đến 1.0.
+7. `isLeaderBraking`: Trạng thái bật đèn phanh của xe phía trước (1.0 nếu đang phanh, 0.0 nếu bình thường).
+8. `pedestrianDetected`: Nhận diện người đi bộ cắt ngang hành lang di chuyển phía trước (1.0 nếu có, 0.0 nếu an toàn).
+9. `trafficDensity`: Mật độ phương tiện cục bộ tại vị trí xe, trích xuất từ hệ thống quản lý trường mật độ (0.0 đến 1.0).
+10. `oppositeClearGap`: Cự ly thông thoáng của làn ngược chiều kế bên tim đường, chuẩn hóa trong đoạn 0.0 đến 1.0.
+11. `isOvertakingOpposite`: Trạng thái xe đang thực hiện hành vi mượn làn ngược chiều (1.0 nếu đang trên làn ngược chiều, 0.0 nếu đang ở làn nhà).
+12. `isChangingLane`: Trạng thái xe đang trong quá trình chuyển dịch ngang giữa các làn đường (1.0 nếu đang chuyển làn, 0.0 nếu bám làn ổn định).
+13. `adjacentClearGap`: Khoảng trống an toàn trên làn kế bên mà xe dự định chuyển sang (0.0 đến 1.0).
 
-### 🔄 Cơ chế Vượt làn đối diện & Tự động quay về:
-1. **Bắt đầu vượt**: Khi làn nhà bị tắc nghẽn (`gap < 18m` hoặc mật độ cao) và làn ngược chiều kế bên thông thoáng (`oppositeClearDist >= 35m`, không có xe đối đầu), xe bật xi nhan trái, chuyển làn mục tiêu sang làn đối diện ($X = -2.0$ cho xe $+Z$, $X = +2.0$ cho xe $-Z$) và tăng tốc dứt khoát.
-2. **Quay về làn nhà**:
-   - Khi trước mặt trên làn ngược chiều có vật cản (xe đối đầu tiến lại gần $< 30\text{m}$ hoặc có người đi bộ).
-   - Hoặc khi đã vượt qua đoạn đông và làn nhà phía trước đã đủ thoáng an toàn ($> 16\text{m}$).
-   - Xe bật xi nhan phải, bẻ lái trở về phần đường nhà và tắt trạng thái vượt khi đã vào làn ổn định.
-3. **Bảo hiểm khẩn cấp (Safety Supervisor)**: Nếu xe đối đầu tiến tới cự ly nguy cấp ($< 16\text{m}$), hệ thống lập tức cưỡng bức phanh gấp và bẻ lái tấp về làn nhà để triệt tiêu nguy cơ đối đầu.
+### 1.3. 10 Giá Trị Đầu Ra Chính Sách
+
+Đầu ra của mô hình điều phối đồng thời cả quyết định chiến thuật lẫn thao tác điều khiển:
+
+Tầng 1 - Quyết định hành vi bậc cao (lấy vị trí có điểm số cao nhất trong 8 đầu ra đầu tiên):
+* Trạng thái 0 (FreeFlow): Đường thông thoáng, xe duy trì vận tốc ổn định theo tốc độ thiết kế.
+* Trạng thái 1 (CarFollowing): Bám đuôi xe trước, tự động giữ cự ly an toàn theo biến thiên vận tốc xe dẫn đầu.
+* Trạng thái 2 (ActiveEvasion): Chủ động đổi sang làn kế bên cùng chiều khi phát hiện vật cản hoặc xe phía trước di chuyển quá chậm.
+* Trạng thái 3 (SafeYielding): Giảm tốc độ hoặc phanh dừng an toàn trước vạch kẻ đường khi có người đi bộ qua đường.
+* Trạng thái 4 (EmergencyShield): Kích hoạt chế độ phanh khẩn cấp và tách va chạm khi cự ly nguy cấp.
+* Trạng thái 5 (OppositeOvertake): Vượt xe bằng cách mượn làn đối diện khi làn nhà bị tắc nghẽn và chiều ngược lại hoàn toàn thông thoáng.
+* Trạng thái 6 (AbortLaneChange): Tự động hủy chuyển làn khi phát hiện làn kế bên bị kẹt đột ngột, bẻ lái căn thẳng xe trở lại tim làn cũ để triệt tiêu góc nghiêng, ngăn ngừa phương tiện chắn ngang đường.
+* Trạng thái 7 (CreepForward): Tự động bò nhích tới ở dải vận tốc thấp khi xe trước di chuyển nhẹ hoặc xuất hiện khoảng trống ngắn, giải tỏa dòng ùn ứ.
+
+Tầng 2 - Chấp hành điều khiển liên tục:
+* Đầu ra thứ 9 (chỉ số 8): Giá trị gia tốc chuẩn hóa từ -1.0 đến +1.0, được ánh xạ vào dải gia tốc vật lý cực đại của phương tiện.
+* Đầu ra thứ 10 (chỉ số 9): Giá trị góc lái chuẩn hóa từ -1.0 đến +1.0, được ánh xạ vào góc đánh lái tối đa của phương tiện.
 
 ---
 
-## 🚸 3. Vạch kẻ đường Zebra Crossing & Người đi bộ
+## 2. Quy Trình Huấn Luyện Mô Hình
 
-* **Zebra Crossing**:
-  - Bố trí tại 3 cụm nút giao: $Z = 120\text{m}, 250\text{m}, 380\text{m}$.
-  - Mỗi cụm gồm 15 vạch trắng song song kích thước $0.5\text{m} \times 0.002\text{m} \times 4.0\text{m}$.
-  - **Không có Collider**: Xe chạy qua hoàn toàn phẳng, không gây rung lắc vật lý.
-  - **Layer 2 (`Ignore Raycast`)**: Cảm biến Raycast của xe bỏ qua hoàn toàn vạch kẻ này.
-* **Người đi bộ (PedestrianAgent & PedestrianSpawner)**:
-  - Hardcode độc lập, sang đường từ cả 2 bên (Trái $\to$ Phải và Phải $\to$ Trái).
-  - Hệ thống 5 tia quét xe, tự dừng nhường khi có xe lao tới gần, né vòng xe chết máy và đổi đỏ khi va chạm.
+Các mô hình được huấn luyện bằng PyTorch thông qua 3 kịch bản chính:
+* `train_adaptive_traffic_agent.py`: Huấn luyện mô hình ô tô toàn diện hỗ trợ chuyển làn, vượt xe ngược chiều, hủy chuyển làn và bò nhích giải tỏa ùn tắc.
+* `train_motorcycle_agent.py`: Huấn luyện mô hình xe máy với đặc thù phản xạ nhanh, gia tốc bốc, góc quay linh hoạt và khả năng luồn lách qua các khoảng trống hẹp.
+* `train_opposite_overtake_agent.py`: Kịch bản thử nghiệm cơ chế mượn làn đối diện và thu hồi làn đường.
+
+### 2.1. Tổng Hợp Dữ Liệu Huấn Luyện
+
+Mỗi kịch bản khởi tạo từ 150.000 đến 180.000 mẫu dữ liệu mô phỏng ngẫu nhiên phân bố đều trên toàn bộ không gian trạng thái giao thông. Các nhãn hành vi và mục tiêu điều khiển được gán theo quy tắc chuyên gia kết hợp hàm mục tiêu:
+* Ngưỡng phanh khẩn cấp: Áp dụng khi cự ly dưới 4% tầm quét hoặc khi vận tốc tiếp cận âm vượt ngưỡng an toàn.
+* Ngưỡng nhường đường người đi bộ: Ưu tiên dừng xe khi người đi bộ xuất hiện trong hành lang cắt ngang.
+* Quyết định hủy chuyển làn: Kích hoạt khi xe đang trong trạng thái chuyển làn nhưng khoảng trống làn mới bị thu hẹp đột ngột dưới mức an toàn hoặc vận tốc bị nghẽn.
+* Quyết định bò nhích: Kích hoạt khi vận tốc gần như dừng hẳn, khoảng cách phía trước từ 2.5m đến 14m và không có người đi bộ.
+* Quyết định mượn làn vượt xe: Kích hoạt khi mật độ làn nhà cao hoặc xe trước đi chậm, đồng thời khoảng trống làn đối diện đảm bảo tầm nhìn an toàn lớn.
+
+### 2.2. Hàm Mất Mát Và Tối Ưu Hóa
+
+Quá trình học sử dụng hàm mất mát kết hợp đa nhiệm:
+* Mất mát phân loại hành vi: Sử dụng hàm mất mát phân loại (CrossEntropyLoss) đo sai số giữa nhãn hành vi chuyên gia và điểm số dự đoán của nhánh quyết định.
+* Mất mát điều khiển liên tục: Sử dụng hàm mất mát hồi quy (MSELoss) đo sai số bình phương trung bình giữa gia tốc, góc lái dự đoán và mục tiêu điều khiển.
+* Tổng mất mát: Kết hợp tuyến tính `Loss = Loss_cls + trọng_số * Loss_reg` với trọng số 1.8 đối với ô tô và 2.0 đối với xe máy.
+
+Thuật toán tối ưu hóa (Optimizer) Adam được áp dụng với tốc độ học ban đầu từ 0.0025 đến 0.003, kết hợp bộ điều chỉnh suy giảm hàm cos (CosineAnnealingLR) qua 15 chu kỳ huấn luyện để đạt độ chính xác phân loại trên 99.8%.
+
+### 2.3. Xuất Mô Hình Sang ONNX
+
+Sau khi huấn luyện hoàn tất, mô hình được xuất sang định dạng ONNX chuẩn phiên bản toán tử 13 (opset 13), cho phép kích thước lô biến thiên theo số lượng phương tiện thực tế chạy trong cảnh mô phỏng.
 
 ---
 
-## 🚗 4. Cơ chế Sinh xe & Quản lý Luồng giao thông (TrafficSpawner)
+## 3. So Sánh Động Lực Học Giữa Ô Tô Và Xe Máy
 
-* **Tự động sinh 24-28 xe** trải đều trên 4 làn với thuật toán `ResolveOverlap` ngăn chặn hoàn toàn va chạm lúc xuất phát.
-* **Tính cách tài xế (Hurry Factor)**: Phân hóa ngẫu nhiên $0.75\times \dots 1.35\times$ tốc độ và độ bám sát.
-* **Cảnh báo va chạm**: Thân xe tự động chuyển sang màu đỏ rực khi có va chạm với xe khác hoặc rào chắn (`CarCollisionVisualizer`), đồng thời kích hoạt đèn phanh đỏ (`CarLightsController`).
+Dự án mô phỏng hai loại phương tiện với sự khác biệt rõ rệt về cấu hình vật lý và chiến thuật điều khiển:
+
+| Đặc tính | Phương tiện Ô tô | Phương tiện Xe máy |
+| :--- | :--- | :--- |
+| File mô hình ONNX | `traffic_aif_agent.onnx` | `traffic_motorcycle_agent.onnx` |
+| Kích thước bao (Rộng x Cao x Dài) | 1.8m x 1.0m x 4.0m | 0.6m x 1.0m x 2.67m (bằng 1/3 bề rộng ô tô) |
+| Khối lượng vật lý | 1500 kg | 300 kg |
+| Gia tốc tối đa | 8.0 m/s2 | 12.0 m/s2 (tăng tốc và phanh nhạy hơn) |
+| Góc đánh lái tối đa | 18 độ | 28 độ (góc bẻ lái cơ động hơn) |
+| Khoảng cách phanh khẩn cấp | 2.5 m | 1.8 m |
+| Cự ly an toàn làn đối diện để vượt | Tối thiểu 35 m | Tối thiểu 22 m |
+| Thời gian giãn cách giữa 2 lần đổi làn | 2.0 - 5.0 giây | 0.8 - 2.0 giây (thường xuyên đổi làn né vật cản) |
+| Dãn cách xuất phát dọc trục đường | 18.0 - 36.0 m | 6.0 - 14.0 m |
+| Độ lệch ngang tim làn xuất phát | 0.0 m (chính giữa làn) | Lệch linh hoạt sang trái hoặc phải 0.65 m |
+
+---
+
+## 4. Suy Luận Thời Gian Thực Trên Unity
+
+Tại mỗi khung hình vật lý trong Unity, lớp điều khiển `AIFVehicleAgent` thực hiện các bước sau:
+1. Trích xuất dữ liệu cảm biến: Sử dụng các tia quét phía trước, hai bên hông và phía sau để tính toán cự ly, vận tốc tương đối và khoảng trống an toàn.
+2. Xây dựng véc-tơ đầu vào: Chuẩn hóa 13 tham số môi trường và đóng gói vào mảng Tensor.
+3. Thực thi suy luận qua Sentis: Đưa véc-tơ qua mô hình mạng nơ-ron sâu để nhận về 10 giá trị đầu ra.
+4. Điều phối hành vi:
+   * Nếu mô hình chọn trạng thái vượt làn đối diện, xe bật đèn báo rẽ trái, dịch chuyển mục tiêu tim làn sang phần đường ngược chiều và gia tăng tốc độ.
+   * Khi gặp xe đối đầu tiến lại gần dưới 30m hoặc phát hiện làn nhà đã thông thoáng, xe tự động bật đèn báo rẽ phải và thu hồi về phần đường của mình.
+   * Nếu đang trong quá trình chuyển làn mà gặp vật cản kẹt, hành vi hủy chuyển làn sẽ cưỡng bức đưa góc xe trở lại song song với tim đường, triệt tiêu nguy cơ nằm chéo làn.
+   * Khi dòng phương tiện phía trước dừng, hành vi bò nhích giúp xe di chuyển từ tốn ở vận tốc 1.5 - 2.5 m/s để lấp đầy các khoảng hở an toàn nhỏ.
+5. Áp dụng lực vật lý: Chuyển hóa gia tốc và góc lái thành lực đẩy Rigidbody theo trục dọc và góc quay quanh trục đứng.
+
+---
+
+## 5. Cấu Hình Hạ Tầng Giao Thông & Môi Trường Mô Phỏng
+
+### 5.1. Hình Học Lòng Đường
+
+* Chiều rộng mặt đường: 16.0m (tọa độ ngang từ -8.0m đến +8.0m).
+* Chiều dài tuyến đường: 500.0m (tọa độ dọc từ 0m đến 500m).
+* Tim đường (tọa độ 0.0m): Mặt đường liền mạch, không có dải phân cách cứng, tạo điều kiện cho các phương tiện thực hiện hành vi mượn làn vượt xe khi đủ điều kiện an toàn.
+* Phân chia 4 làn xe đối xứng:
+  * Làn 0 (Trái ngoài cùng): Tọa độ -6.0m, chiều di chuyển theo hướng trục âm Z.
+  * Làn 1 (Trái trong cùng): Tọa độ -2.0m, chiều di chuyển theo hướng trục âm Z.
+  * Làn 2 (Phải trong cùng): Tọa độ +2.0m, chiều di chuyển theo hướng trục dương Z.
+  * Làn 3 (Phải ngoài cùng): Tọa độ +6.0m, chiều di chuyển theo hướng trục dương Z.
+* Rào chắn hai bên: Bố trí tại tọa độ ngang cộng trừ 8.15m với chiều cao 1.2m dọc toàn tuyến.
+
+### 5.2. Hệ Thống Vạch Sang Đường Và Người Đi Bộ
+
+* Cụm vạch qua đường: Được đặt tại các vị trí dọc trục đường ở 120m, 250m và 380m. Mỗi cụm gồm 15 vạch trắng song song, không gắn va chạm vật lý và thuộc lớp nhận diện bỏ qua tia quét để xe lưu thông êm thuận.
+* Tác nhân người đi bộ: Hoạt động qua lớp điều khiển `PedestrianAgent`, tự động băng qua đường từ cả hai hướng trái sang phải và ngược lại. Tác nhân được trang bị hệ thống 5 tia quét phát hiện xe từ xa, tự động dừng lại nhường đường khi có xe đang lao tới và tiếp tục hành trình khi khoảng trống đã an toàn.
+
+### 5.3. Sinh Phương Tiện Tự Động
+
+Bộ điều phối `TrafficSpawner` quản lý việc xuất hiện đồng thời của cả ô tô và xe máy:
+* Tỷ lệ cơ cấu phương tiện: Khoảng 8 ô tô và 28 xe máy phân bố trên cả 4 làn đường.
+* Thuật toán khử trùng lặp vị trí: Tự động rà soát tọa độ khi sinh xe để đảm bảo khoảng cách giãn cách tối thiểu, loại bỏ hoàn toàn hiện tượng lồng ghép vật lý lúc bắt đầu mô phỏng.
+* Yếu tố tính cách tài xế: Mỗi phương tiện nhận một hệ số vội vàng ngẫu nhiên từ 0.75 đến 1.35, quyết định mức độ bám sát đuôi xe trước và tốc độ hành trình mong muốn.
+
+### 5.4. Trực Quan Hóa Tín Hiệu Và Va Chạm
+
+* Bộ điều khiển đèn xe: Quản lý hệ thống đèn pha phía trước và đèn hậu phía sau. Đèn hậu tự động chuyển màu đỏ rực khi xe thực hiện phanh hoặc dừng khẩn cấp.
+* Trực quan hóa va chạm: Khi xảy ra va chạm vật lý với phương tiện khác hoặc rào chắn bên đường, toàn bộ thân xe sẽ chuyển sang màu đỏ cảnh báo và trở về màu sơn gốc khi thoát ly va chạm.
+
+---
+
+## 6. Hướng Dẫn Vận Hành
+
+1. Mở dự án bằng phiên bản Unity 6 (khuyến nghị 6000.3.16f1 trở lên).
+2. Mở cảnh mô phỏng tại đường dẫn `Assets/Scenes/TwoLaneSimulationScene.unity`.
+3. Nếu cần tái tạo toàn bộ dữ liệu cấu hình hạ tầng và các Prefab phương tiện:
+   * Chọn thanh công cụ trên menu: `Tools -> TwoLane Simulation -> Rebuild Scene and Prefabs`.
+4. Nhấn nút Play trong Unity Editor để bắt đầu quá trình mô phỏng tương tác giao thông thời gian thực.
+5. Để huấn luyện lại các mô hình trí tuệ nhân tạo:
+   * Chạy lệnh `python train_adaptive_traffic_agent.py` để cập nhật mô hình ô tô.
+   * Chạy lệnh `python train_motorcycle_agent.py` để cập nhật mô hình xe máy.
+   * Các file ONNX đầu ra sẽ tự động được ghi đè trực tiếp vào thư mục `Assets/Models/` của dự án Unity.
