@@ -3,12 +3,6 @@ using UnityEngine;
 
 namespace TwoLaneSimulation
 {
-    /// <summary>
-    /// Quản lý việc sinh người đi bộ qua đường (Pedestrian Spawner):
-    /// - Tự động sinh người đi bộ định kỳ tại các vị trí vạch kẻ đường (Zebra Crossing) hoặc ngẫu nhiên dọc đường.
-    /// - Người đi bộ có thể xuất phát từ CẢ 2 BÊN ĐƯỜNG (trái sang phải hoặc phải sang trái).
-    /// - Hỗ trợ tùy chỉnh tốc độ, độ rộng mặt đường và màu sắc trang phục ngẫu nhiên.
-    /// </summary>
     public class PedestrianSpawner : MonoBehaviour
     {
         [Header("Pedestrian Prefab")]
@@ -20,10 +14,10 @@ namespace TwoLaneSimulation
         public bool autoSpawn = true;
 
         [Tooltip("Khoảng thời gian tối thiểu giữa 2 lần sinh (giây)")]
-        public float minSpawnInterval = 5.0f;
+        public float minSpawnInterval = 20.0f;
 
         [Tooltip("Khoảng thời gian tối đa giữa 2 lần sinh (giây)")]
-        public float maxSpawnInterval = 10.0f;
+        public float maxSpawnInterval = 25.0f;
 
         [Tooltip("Giới hạn số lượng người qua đường đồng thời")]
         public int maxSimultaneousPedestrians = 10;
@@ -60,17 +54,16 @@ namespace TwoLaneSimulation
         private List<PedestrianAgent> _activePedestrians = new List<PedestrianAgent>();
         private Transform _pedestrianContainer;
 
-        // Bảng màu trang phục người đi bộ
         private static readonly Color[] ClothingPalette = new Color[]
         {
-            new Color(0.95f, 0.75f, 0.10f), // Vàng cam ấm
-            new Color(0.20f, 0.55f, 0.90f), // Xanh dương
-            new Color(0.15f, 0.75f, 0.45f), // Xanh lá cây
-            new Color(0.85f, 0.30f, 0.20f), // Cam đỏ
-            new Color(0.60f, 0.25f, 0.85f), // Tím thạch anh
-            new Color(0.20f, 0.80f, 0.85f), // Xanh ngọc
-            new Color(0.90f, 0.90f, 0.90f), // Trắng xám
-            new Color(0.35f, 0.35f, 0.40f)  // Xám đậm
+            new Color(0.95f, 0.75f, 0.10f),
+            new Color(0.20f, 0.55f, 0.90f),
+            new Color(0.15f, 0.75f, 0.45f),
+            new Color(0.85f, 0.30f, 0.20f),
+            new Color(0.60f, 0.25f, 0.85f),
+            new Color(0.20f, 0.80f, 0.85f),
+            new Color(0.90f, 0.90f, 0.90f),
+            new Color(0.35f, 0.35f, 0.40f)
         };
 
         private void Awake()
@@ -107,9 +100,6 @@ namespace TwoLaneSimulation
             _nextSpawnTimer = Random.Range(minSpawnInterval, maxSpawnInterval);
         }
 
-        /// <summary>
-        /// Sinh ngẫu nhiên một người đi bộ từ một trong hai bên đường
-        /// </summary>
         public GameObject SpawnPedestrian()
         {
             if (pedestrianPrefab == null)
@@ -129,16 +119,12 @@ namespace TwoLaneSimulation
                 spawnZ = Random.Range(minSpawnZ, maxSpawnZ);
             }
 
-            // Hướng đi: ngẫu nhiên từ trái sang phải (50%) hoặc từ phải sang trái (50%)
             bool fromLeftToRight = (Random.value > 0.5f);
             float speed = Random.Range(minWalkingSpeed, maxWalkingSpeed);
 
             return SpawnPedestrianAt(spawnZ, fromLeftToRight, speed);
         }
 
-        /// <summary>
-        /// Sinh người đi bộ tại vị trí Z chỉ định với hướng và tốc độ tùy chọn
-        /// </summary>
         public GameObject SpawnPedestrianAt(float zPosition, bool fromLeftToRight = true, float walkingSpeed = 1.4f)
         {
             if (pedestrianPrefab == null)
@@ -149,7 +135,6 @@ namespace TwoLaneSimulation
 
             float halfRoad = roadWidth * 0.5f;
             int direction = fromLeftToRight ? 1 : -1;
-            // Xuất phát cách mép đường 1.0m
             float startX = fromLeftToRight ? (-halfRoad - 1.0f) : (halfRoad + 1.0f);
 
             Vector3 spawnPos = new Vector3(startX, spawnHeightY, zPosition);

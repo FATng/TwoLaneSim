@@ -2,10 +2,6 @@ using UnityEngine;
 
 namespace TwoLaneSimulation
 {
-    /// <summary>
-    /// Quản lý bản đồ mật độ giao thông liên tục (Mean Field Traffic Density)
-    /// Cung cấp thông số density nạp vào đầu vào số 9 của mô hình AI.
-    /// </summary>
     public class TrafficFieldManager : MonoBehaviour
     {
         public static TrafficFieldManager Instance { get; private set; }

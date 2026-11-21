@@ -2,12 +2,6 @@ using UnityEngine;
 
 namespace TwoLaneSimulation
 {
-    /// <summary>
-    /// Quản lý hiệu ứng màu sắc của thân xe khi xảy ra va chạm:
-    /// - Khi 2 xe va chạm vào nhau: CẢ HAI XE đều cùng chuyển sang màu đỏ rực.
-    /// - Khi xe va chạm vào rào chắn bên đường: xe chuyển sang màu đỏ rực.
-    /// - Khi hết va chạm: duy trì cảnh báo đỏ trong một khoảng thời gian trước khi hồi phục màu ban đầu.
-    /// </summary>
     [DisallowMultipleComponent]
     public class CarCollisionVisualizer : MonoBehaviour
     {
@@ -27,7 +21,7 @@ namespace TwoLaneSimulation
 
         [Header("Collision Timer")]
         [Tooltip("Thời gian duy trì màu đỏ sau va chạm (giây)")]
-        public float collisionRedDuration = 3.0f;
+        public float collisionRedDuration = 2.0f;
 
         private MaterialPropertyBlock _propBlock;
         private float _redTimer = 0f;
@@ -38,15 +32,15 @@ namespace TwoLaneSimulation
 
         public static readonly Color[] SafeColorPalette = new Color[]
         {
-            new Color(0.92f, 0.93f, 0.96f, 1f), // Trắng ánh bạc
-            new Color(0.15f, 0.45f, 0.90f, 1f), // Xanh dương hoàng gia
-            new Color(0.10f, 0.68f, 0.40f, 1f), // Xanh ngọc lục bảo (Emerald)
-            new Color(0.15f, 0.72f, 0.88f, 1f), // Xanh lơ (Cyan)
-            new Color(0.20f, 0.80f, 0.58f, 1f), // Xanh bạc hà (Mint)
-            new Color(0.85f, 0.85f, 0.25f, 1f), // Vàng chanh nhạt (Lime)
-            new Color(0.32f, 0.35f, 0.40f, 1f), // Xám nòng súng (Gunmetal)
-            new Color(0.12f, 0.22f, 0.48f, 1f), // Xanh Navy đậm
-            new Color(0.16f, 0.17f, 0.19f, 1f)  // Đen than chì (Charcoal)
+            new Color(0.92f, 0.93f, 0.96f, 1f),
+            new Color(0.15f, 0.45f, 0.90f, 1f),
+            new Color(0.10f, 0.68f, 0.40f, 1f),
+            new Color(0.15f, 0.72f, 0.88f, 1f),
+            new Color(0.20f, 0.80f, 0.58f, 1f),
+            new Color(0.85f, 0.85f, 0.25f, 1f),
+            new Color(0.32f, 0.35f, 0.40f, 1f),
+            new Color(0.12f, 0.22f, 0.48f, 1f),
+            new Color(0.16f, 0.17f, 0.19f, 1f)
         };
 
         public static bool IsReddish(Color c)
@@ -127,12 +121,12 @@ namespace TwoLaneSimulation
             if (other.CompareTag("Vehicle") || other.GetComponentInParent<AIFVehicleAgent>() != null || other.GetComponentInParent<CarCollisionVisualizer>() != null)
             {
                 _isCurrentlyColliding = true;
-                TriggerCrash(3.0f);
+                TriggerCrash(2.0f);
 
                 var otherVisualizer = other.GetComponentInParent<CarCollisionVisualizer>();
                 if (otherVisualizer != null)
                 {
-                    otherVisualizer.TriggerCrash(3.0f);
+                    otherVisualizer.TriggerCrash(2.0f);
                 }
                 return;
             }

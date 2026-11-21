@@ -10,12 +10,6 @@ namespace TwoLaneSimulation
         Hazard = 3
     }
 
-    /// <summary>
-    /// Điều khiển hệ thống đèn hậu ở đuôi xe:
-    /// - Khi phanh: đèn sáng đỏ rực.
-    /// - Khi xi nhan (trái/phải/khẩn cấp): nhấp nháy màu vàng cam.
-    /// - Bình thường: đèn đỏ dịu.
-    /// </summary>
     [DisallowMultipleComponent]
     public class CarLightsController : MonoBehaviour
     {

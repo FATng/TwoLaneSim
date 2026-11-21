@@ -14422,16 +14422,24 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 860fc131015a83f4cb99f8fc266d29f9, type: 3}
   m_Name: 
   m_EditorClassIdentifier: TwoLaneSimulation::TrafficSpawner
+  forwardCarPrefab: {fileID: 1000000000000001, guid: c1000000000000000000000000000001, type: 3}
+  reverseCarPrefab: {fileID: 1000000000000001, guid: c1000000000000000000000000000002, type: 3}
+  forwardMotorcyclePrefab: {fileID: 1000000000000001, guid: c1000000000000000000000000000005, type: 3}
+  reverseMotorcyclePrefab: {fileID: 1000000000000001, guid: c1000000000000000000000000000006, type: 3}
   forwardVehiclePrefab: {fileID: 1000000000000001, guid: c1000000000000000000000000000001, type: 3}
   reverseVehiclePrefab: {fileID: 1000000000000001, guid: c1000000000000000000000000000002, type: 3}
-  totalVehicles: 24
+  totalCars: 8
+  totalMotorcycles: 28
   lanePositions:
   - -6
   - -2
   - 2
   - 6
-  minIntervalZ: 16
-  maxIntervalZ: 35
+  minIntervalZCar: 18
+  maxIntervalZCar: 36
+  minIntervalZMotorcycle: 6
+  maxIntervalZMotorcycle: 14
+  motorcycleLateralOffset: 0.65
   spawnHeightY: 0.5
   minHurryFactor: 0.75
   maxHurryFactor: 1.35
@@ -14449,8 +14457,8 @@ MonoBehaviour:
   m_EditorClassIdentifier: TwoLaneSimulation::PedestrianSpawner
   pedestrianPrefab: {fileID: 1000000000000001, guid: c1000000000000000000000000000004, type: 3}
   autoSpawn: 1
-  minSpawnInterval: 5
-  maxSpawnInterval: 10
+  minSpawnInterval: 20
+  maxSpawnInterval: 25
   maxSimultaneousPedestrians: 10
   roadWidth: 16
   minSpawnZ: 35

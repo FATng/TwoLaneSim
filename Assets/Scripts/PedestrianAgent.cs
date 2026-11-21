@@ -2,13 +2,6 @@ using UnityEngine;
 
 namespace TwoLaneSimulation
 {
-    /// <summary>
-    /// Điều khiển hành vi người đi bộ qua đường (dạng khối chữ nhật) bằng Hardcode logic:
-    /// - Di chuyển ngang qua lòng đường (trục X) từ lề này sang lề đối diện (hỗ trợ cả 2 hướng trái -> phải và phải -> trái).
-    /// - Raycast phía trước phát hiện xe: nếu xe đang chạy thì dừng lại nhường đường, nếu xe dừng chắn thì đi vòng né qua xe.
-    /// - Khi va chạm với xe: chuyển sang màu đỏ rực, dừng lại trong vài giây rồi tách khỏi xe tiếp tục đi.
-    /// - Tự động hủy khi đã sang đường an toàn.
-    /// </summary>
     [RequireComponent(typeof(Collider))]
     public class PedestrianAgent : MonoBehaviour
     {
@@ -44,7 +37,7 @@ namespace TwoLaneSimulation
 
         [Header("Crash / Collision Reaction (Tô đỏ và dừng lại)")]
         [Tooltip("Thời gian đứng yên sau khi va chạm với xe (giây)")]
-        public float crashPauseDuration = 3.0f;
+        public float crashPauseDuration = 1.0f;
 
         [Tooltip("Màu cảnh báo khi bị đâm va (Đỏ rực)")]
         public Color crashColor = new Color(1.0f, 0.05f, 0.05f, 1f);
@@ -88,7 +81,6 @@ namespace TwoLaneSimulation
                 _rb.isKinematic = true;
             }
 
-            // Gán PhysicsMaterial triệt tiêu ma sát (zero friction) để người không bao giờ bị bám dính hay kéo theo xe
             Collider col = GetComponent<Collider>();
             if (col != null)
             {
@@ -120,9 +112,6 @@ namespace TwoLaneSimulation
             UpdateFacingRotation();
         }
 
-        /// <summary>
-        /// Khởi tạo thông số người qua đường khi spawn
-        /// </summary>
         public void Initialize(Vector3 startPos, int direction, float speed, float width)
         {
             transform.position = startPos;
@@ -153,16 +142,14 @@ namespace TwoLaneSimulation
 
             float dt = Time.deltaTime;
 
-            // 1. Xử lý trạng thái va chạm (Tô đỏ và đứng yên)
             if (isInCrashState)
             {
                 _crashTimer -= dt;
                 if (_crashTimer <= 0f)
                 {
                     isInCrashState = false;
-                    ApplyColor(_normalColor); // Khôi phục màu ban đầu
+                    ApplyColor(_normalColor);
 
-                    // Sau khoảng chờ: Dời người dạt sang hướng qua đường để thoát khỏi đầu xe
                     Vector3 sepPos = transform.position;
                     sepPos.x += crossingDirection * 1.8f;
 
@@ -188,7 +175,6 @@ namespace TwoLaneSimulation
                 _postCrashGraceTimer -= dt;
             }
 
-            // 2. Dò quét xe phía trước mặt bằng Raycast
             if (_postCrashGraceTimer <= 0f)
             {
                 bool hasVehicleAhead = ScanForVehicles(out bool isStoppedCar, out GameObject carObj, out float hitDist);
@@ -197,7 +183,6 @@ namespace TwoLaneSimulation
                 {
                     if (!isStoppedCar)
                     {
-                        // XE ĐANG CHẠY: Dừng lại nhường đường an toàn
                         isYieldingToVehicle = true;
                         isDetouring = false;
                         _detourTimer = 0f;
@@ -205,7 +190,6 @@ namespace TwoLaneSimulation
                     }
                     else
                     {
-                        // XE ĐÃ DỪNG LẠI: Cho phép người đi bộ tiếp tục hoặc lách né vòng qua xe
                         isYieldingToVehicle = false;
 
                         if (carObj != null)
@@ -238,14 +222,11 @@ namespace TwoLaneSimulation
                 if (_detourTimer <= 0f) isDetouring = false;
             }
 
-            // 3. Di chuyển người đi bộ
             _walkTimer += dt;
             Vector3 pos = transform.position;
 
-            // Bước ngang qua đường (trục X)
             pos.x += crossingDirection * walkingSpeed * dt;
 
-            // Dịch tránh chướng ngại vật (trục Z) khi đi vòng qua xe dừng
             if (_detourTimer > 0f)
             {
                 _detourTimer -= dt;
@@ -260,13 +241,11 @@ namespace TwoLaneSimulation
                 }
             }
 
-            // 4. Hiệu ứng nhấp nhô mô phỏng nhịp bước chân
             float bobOffset = Mathf.Sin(_walkTimer * stepFrequency * Mathf.PI) * stepBobAmplitude;
             pos.y = _baseHeightY + Mathf.Abs(bobOffset);
 
             transform.position = pos;
 
-            // 5. Kiểm tra đến đích (vượt qua mép đường bên kia)
             bool reached = (crossingDirection > 0 && pos.x >= targetX) ||
                            (crossingDirection < 0 && pos.x <= targetX);
 
@@ -280,9 +259,6 @@ namespace TwoLaneSimulation
             }
         }
 
-        /// <summary>
-        /// Bắn 5 tia Raycast hình quạt để phát hiện xe ô tô cắt ngang
-        /// </summary>
         private bool ScanForVehicles(out bool isStoppedCar, out GameObject detectedCar, out float hitDist)
         {
             isStoppedCar = false;
@@ -323,7 +299,6 @@ namespace TwoLaneSimulation
                     carSpeed = rb.linearVelocity.magnitude;
                 }
 
-                // Xe chạy chậm hoặc đã dừng (< 0.5 m/s)
                 if (carSpeed < 0.5f)
                 {
                     isStoppedCar = true;

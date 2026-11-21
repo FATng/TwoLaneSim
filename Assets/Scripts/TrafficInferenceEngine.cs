@@ -4,10 +4,6 @@ using Unity.InferenceEngine;
 
 namespace TwoLaneSimulation
 {
-    /// <summary>
-    /// Quản lý runtime của Unity Sentis (Inference Engine) cho các mô hình thần kinh .onnx
-    /// Dự đoán chính sách và gia tốc của xe trên đường.
-    /// </summary>
     public class TrafficInferenceEngine : MonoBehaviour
     {
         [Header("Model Configuration")]

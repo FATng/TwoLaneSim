@@ -6,25 +6,23 @@ namespace TwoLaneSimulation
 {
     public enum DrivingMode
     {
-        FreeFlow,        // Đường thông thoáng: duy trì vận tốc và đi thẳng ổn định
-        CarFollowing,    // Bám đuôi xe trước: điều tiết cự ly và tốc độ bám đuôi an toàn
-        ActiveEvasion,   // Chủ động lách né: vượt chướng ngại vật/người đi bộ sang khoảng trống
-        SafeYielding,    // Dừng hoặc giảm tốc nhường đường cho người đi bộ
-        EmergencyShield  // Lớp bảo hiểm phanh khẩn cấp & tách va chạm vật lý
+        FreeFlow,
+        CarFollowing,
+        ActiveEvasion,
+        SafeYielding,
+        EmergencyShield,
+        OppositeOvertake,
+        AbortLaneChange,
+        CreepForward
     }
 
-    /// <summary>
-    /// Điều khiển phương tiện giao thông tự hành bằng mạng nơ-ron sâu đa nhiệm (Multi-Head Neural Network)
-    /// Hỗ trợ hoàn hảo đường 4 làn xe chạy NGƯỢC CHIỀU NHAU (Làn trái -Z, Làn phải +Z).
-    /// Suy luận thời gian thực qua Unity Sentis (.onnx model).
-    /// </summary>
     [RequireComponent(typeof(Rigidbody))]
     public class AIFVehicleAgent : MonoBehaviour
     {
         [Header("Sentis ONNX Model")]
         [SerializeField] private ModelAsset onnxModelAsset;
-        [SerializeField] private float targetSpeed = 15f;
-        [SerializeField] private float maxAcceleration = 8f;
+        [SerializeField] public float targetSpeed = 15f;
+        [SerializeField] public float maxAcceleration = 8f;
 
         [Header("Hierarchical Architecture (Kiến trúc phân tầng)")]
         [SerializeField] private DrivingMode currentDrivingMode = DrivingMode.FreeFlow;
@@ -69,11 +67,39 @@ namespace TwoLaneSimulation
         [SerializeField] private bool isChangingLane = false;
         private float laneChangeCooldownTimer = 0f;
 
+        [Header("Opposite Lane Overtake (Lấn làn ngược chiều vượt xe)")]
+        [SerializeField] private bool isOvertakingOpposite = false;
+        public bool IsOvertakingOpposite => isOvertakingOpposite;
+        [SerializeField] private float homeLaneX = 2.0f;
+        [SerializeField] private float oppositeClearDist = 60f;
+        [SerializeField] private float oppositeClearGap = 1.0f;
+        private float oppositeOvertakeCooldownTimer = 0f;
+
+        [Header("Emergency Brake System")]
+        [Tooltip("Khoảng cách tối thiểu can thiệp phanh khẩn cấp khi quá gần xe khác (m)")]
+        public float minEmergencyBrakeDistance = 2.5f;
+        [Tooltip("Gia tốc phanh khẩn cấp can thiệp dừng xe (m/s2)")]
+        public float emergencyBrakeDecel = 24.0f;
+        [SerializeField] private bool isEmergencyBraking = false;
+        public bool IsEmergencyBraking => isEmergencyBraking;
+
+        [Header("Motorcycle Agility Overrides (Xe máy linh hoạt hơn)")]
+        [Tooltip("Gia tốc cực đại của xe máy (m/s2) - bốc và tăng tốc nhanh hơn ô tô")]
+        public float motorcycleMaxAcceleration = 12.0f;
+        [Tooltip("Góc đánh lái tối đa của xe máy (độ) - góc quay cơ động hơn ô tô")]
+        public float motorcycleMaxHeadingAngle = 28.0f;
+
         [Header("Sensor Parameters")]
         public float sideScanDistance = 2.8f;
         public float vehicleSeparationSpeed = 1.2f;
         public float curbSeparationSpeed = 2.5f;
-        public float crashBrakeDecel = 12.0f;
+        public float crashBrakeDecel = 20.0f;
+
+        private float vehicleWidth = 1.8f;
+        private float vehicleLength = 4.0f;
+        private float halfWidth = 0.9f;
+        private float halfLength = 2.0f;
+        public bool IsMotorcycle => (vehicleWidth < 1.0f);
 
         private bool isCollidingWithVehicle = false;
         private bool isCollidingWithBarrier = false;
@@ -83,6 +109,12 @@ namespace TwoLaneSimulation
         private float barrierCollisionTimer = 0f;
         private float pedestrianCollisionPauseTimer = 0f;
         private float postPedestrianCollisionGraceTimer = 0f;
+
+        [Header("Vehicle Collision Hardcode Stop")]
+        [Tooltip("Thời gian dừng hoàn toàn của 2 xe khi đâm nhau để triệt tiêu toàn bộ quán tính và lực đẩy (giây). Mặc định 2s theo yêu cầu.")]
+        public float vehicleCrashStopDuration = 2.0f;
+        private float vehicleCrashPauseTimer = 0f;
+        private float postVehicleCollisionGraceTimer = 0f;
 
         private Model runtimeModel;
         private Worker worker;
@@ -102,11 +134,15 @@ namespace TwoLaneSimulation
         {
             spawnTime = Time.time;
 
-            // Tự động nhận diện hướng chạy từ góc quay hoặc vị trí ban đầu
+            vehicleWidth = transform.lossyScale.x;
+            vehicleLength = transform.lossyScale.z;
+            halfWidth = vehicleWidth * 0.5f;
+            halfLength = vehicleLength * 0.5f;
+
             float forwardZ = transform.forward.z;
             if (forwardZ < -0.2f || transform.position.x < 0f)
             {
-                drivingDirection = -1; // Chạy ngược chiều -Z trên phần đường bên trái (X < 0)
+                drivingDirection = -1;
                 baseYaw = 180f;
                 roadSectionCenter = -4.0f;
                 minSafeX = -7.4f;
@@ -118,7 +154,7 @@ namespace TwoLaneSimulation
             }
             else
             {
-                drivingDirection = 1; // Chạy xuôi chiều +Z trên phần đường bên phải (X > 0)
+                drivingDirection = 1;
                 baseYaw = 0f;
                 roadSectionCenter = 4.0f;
                 minSafeX = 0.6f;
@@ -131,7 +167,7 @@ namespace TwoLaneSimulation
 
             if (rb != null)
             {
-                rb.mass = 1500f;
+                if (rb.mass <= 1f) rb.mass = IsMotorcycle ? 300f : 1500f;
                 rb.useGravity = false;
                 rb.interpolation = RigidbodyInterpolation.Interpolate;
                 rb.collisionDetectionMode = CollisionDetectionMode.ContinuousDynamic;
@@ -152,9 +188,21 @@ namespace TwoLaneSimulation
             effectiveTargetSpeed = targetSpeed * Mathf.Lerp(1.0f, hurryFactor, 0.6f);
 
             targetLaneX = transform.position.x;
-            laneChangeCooldownTimer = Random.Range(2.0f, 5.0f);
+            homeLaneX = (Mathf.Abs(transform.position.x) > 4.0f) ? 6.0f * drivingDirection : 2.0f * drivingDirection;
 
-            // Gán vật liệu cứng chống ma sát dính
+            if (IsMotorcycle)
+            {
+                maxAcceleration = motorcycleMaxAcceleration;
+                maxHeadingAngle = motorcycleMaxHeadingAngle;
+                laneChangeCooldownTimer = Random.Range(0.8f, 2.0f);
+                oppositeOvertakeCooldownTimer = Random.Range(1.2f, 2.5f);
+            }
+            else
+            {
+                laneChangeCooldownTimer = Random.Range(2.0f, 5.0f);
+                oppositeOvertakeCooldownTimer = Random.Range(2.5f, 5.5f);
+            }
+
             Collider[] allCols = GetComponentsInChildren<Collider>();
             PhysicsMaterial solidMat = new PhysicsMaterial("VehiclePhysicsMat")
             {
@@ -174,7 +222,12 @@ namespace TwoLaneSimulation
 #if UNITY_EDITOR
             if (onnxModelAsset == null)
             {
-                onnxModelAsset = UnityEditor.AssetDatabase.LoadAssetAtPath<ModelAsset>("Assets/Models/traffic_aif_agent.onnx");
+                string modelPath = IsMotorcycle ? "Assets/Models/traffic_motorcycle_agent.onnx" : "Assets/Models/traffic_aif_agent.onnx";
+                onnxModelAsset = UnityEditor.AssetDatabase.LoadAssetAtPath<ModelAsset>(modelPath);
+                if (onnxModelAsset == null && IsMotorcycle)
+                {
+                    onnxModelAsset = UnityEditor.AssetDatabase.LoadAssetAtPath<ModelAsset>("Assets/Models/traffic_aif_agent.onnx");
+                }
             }
 #endif
 
@@ -202,12 +255,17 @@ namespace TwoLaneSimulation
             float distLeft,
             float distRight,
             bool isLeaderBraking,
-            bool isPedAhead)
+            bool isPedAhead,
+            float oppClearGap,
+            bool isOvertakingOpp,
+            bool isChanging,
+            float adjClearGap)
         {
             if (worker == null)
             {
                 float fallbackAccel = (gap < 4.0f) ? -4.0f : ((speed < targetSpd) ? 1.5f : 0f);
-                return (DrivingMode.FreeFlow, fallbackAccel, 0f);
+                DrivingMode fallbackMode = (gap < 4.0f) ? DrivingMode.CarFollowing : DrivingMode.FreeFlow;
+                return (fallbackMode, fallbackAccel, 0f);
             }
 
             float normSpeed = Mathf.Clamp01(speed / 30f);
@@ -219,11 +277,17 @@ namespace TwoLaneSimulation
             float leaderBrakeInput = isLeaderBraking ? 1.0f : 0.0f;
             float pedInput = isPedAhead ? 1.0f : 0.0f;
             float trafficDensity = (TrafficFieldManager.Instance != null) ? TrafficFieldManager.Instance.GetDensityAt(transform.position) : 0f;
+            float normOppClearGap = Mathf.Clamp01(oppClearGap);
+            float overtakingInput = isOvertakingOpp ? 1.0f : 0.0f;
+            float changingLaneInput = isChanging ? 1.0f : 0.0f;
+            float adjacentClearInput = Mathf.Clamp01(adjClearGap);
 
             float[] rawInputs = new float[] {
-                normSpeed, normGap, normRelSpeed, speedError, normOffset, sideBalance, leaderBrakeInput, pedInput, trafficDensity
+                normSpeed, normGap, normRelSpeed, speedError, normOffset, sideBalance,
+                leaderBrakeInput, pedInput, trafficDensity, normOppClearGap, overtakingInput,
+                changingLaneInput, adjacentClearInput
             };
-            using var inputTensor = new Tensor<float>(new TensorShape(1, 9), rawInputs);
+            using var inputTensor = new Tensor<float>(new TensorShape(1, 13), rawInputs);
 
             try
             {
@@ -232,11 +296,11 @@ namespace TwoLaneSimulation
                 if (outputTensor != null)
                 {
                     float[] results = outputTensor.DownloadToArray();
-                    if (results != null && results.Length >= 7)
+                    if (results != null && results.Length >= 10)
                     {
                         int bestModeIdx = 0;
                         float maxLogit = results[0];
-                        for (int i = 1; i < 5; i++)
+                        for (int i = 1; i < 8; i++)
                         {
                             if (results[i] > maxLogit)
                             {
@@ -245,8 +309,12 @@ namespace TwoLaneSimulation
                             }
                         }
                         DrivingMode predictedMode = (DrivingMode)bestModeIdx;
-                        float accel = Mathf.Clamp(results[5] * maxAcceleration, -8.0f, 4.0f);
-                        float steer = Mathf.Clamp(results[6] * 0.45f, -0.45f, 0.45f);
+                        float maxSteerMultiplier = IsMotorcycle ? 0.70f : 0.45f;
+                        float maxAccelLimit = IsMotorcycle ? motorcycleMaxAcceleration : 4.0f;
+                        float minAccelLimit = IsMotorcycle ? -10.0f : -8.0f;
+
+                        float accel = Mathf.Clamp(results[8] * maxAcceleration, minAccelLimit, maxAccelLimit);
+                        float steer = Mathf.Clamp(results[9] * maxSteerMultiplier, -maxSteerMultiplier, maxSteerMultiplier);
                         return (predictedMode, accel, steer);
                     }
                 }
@@ -274,12 +342,36 @@ namespace TwoLaneSimulation
                 return;
             }
 
+            if (vehicleCrashPauseTimer > 0f)
+            {
+                vehicleCrashPauseTimer -= dt;
+                if (vehicleCrashPauseTimer <= 0f)
+                {
+                    postVehicleCollisionGraceTimer = 2.5f;
+                }
+                else
+                {
+                    currentSpeed = 0f;
+                    if (rb != null)
+                    {
+                        rb.linearVelocity = Vector3.zero;
+                        rb.angularVelocity = Vector3.zero;
+                        Vector3 pos = rb.position;
+                        pos.y = fixedHeightY;
+                        rb.position = pos;
+                    }
+                    if (lightsController != null) lightsController.SetBraking(true);
+                    return;
+                }
+            }
+
             if (postPedestrianCollisionGraceTimer > 0f) postPedestrianCollisionGraceTimer -= dt;
+            if (postVehicleCollisionGraceTimer > 0f) postVehicleCollisionGraceTimer -= dt;
             if (laneChangeCooldownTimer > 0f) laneChangeCooldownTimer -= dt;
+            if (oppositeOvertakeCooldownTimer > 0f) oppositeOvertakeCooldownTimer -= dt;
 
             effectiveTargetSpeed = targetSpeed * Mathf.Lerp(1.0f, hurryFactor, 0.6f);
 
-            // Độ lệch đường chuẩn hóa từ góc nhìn tài xế
             float halfSectionWidth = 3.4f;
             float rawOffset = (transform.position.x - roadSectionCenter) / halfSectionWidth;
             float normalizedRoadOffset = Mathf.Clamp(rawOffset * drivingDirection, -1f, 1f);
@@ -289,9 +381,6 @@ namespace TwoLaneSimulation
                 TrafficFieldManager.Instance.RegisterVehiclePosition(transform.position);
             }
 
-            // ===================================================================================
-            // HỆ THỐNG CẢM BIẾN QUANG HỌC TOÀN DIỆN (CHÂN THẬT THEO HƯỚNG XE CHẠY)
-            // ===================================================================================
             float distanceToFront = 60f;
             isFrontCarBraking = false;
             frontCarTurnSignal = TurnSignal.None;
@@ -303,41 +392,105 @@ namespace TwoLaneSimulation
             int nearestPedDir = 0;
 
             Vector3 carCenter = new Vector3(transform.position.x, fixedHeightY, transform.position.z);
-            Vector3 frontBumperCenter = carCenter + transform.forward * 2.05f;
+            Vector3 frontBumperCenter = carCenter + transform.forward * (halfLength + 0.05f);
 
-            // 9 tia thẳng phía cản trước
-            float[] frontOffsets = new float[] { 0f, -0.20f, 0.20f, -0.40f, 0.40f, -0.60f, 0.60f, -0.80f, 0.80f };
+            float bumperSpread = halfWidth * 0.85f;
+            float[] frontOffsets = new float[] {
+                0f,
+                -bumperSpread * 0.25f, bumperSpread * 0.25f,
+                -bumperSpread * 0.50f, bumperSpread * 0.50f,
+                -bumperSpread * 0.75f, bumperSpread * 0.75f,
+                -bumperSpread, bumperSpread
+            };
+            float inCorridorThreshold = halfWidth + 0.25f;
+
             for (int r = 0; r < frontOffsets.Length; r++)
             {
                 Vector3 origin = frontBumperCenter + transform.right * frontOffsets[r];
                 if (Physics.Raycast(origin, transform.forward, out RaycastHit hit, 50f))
                 {
-                    if (hit.collider.gameObject != gameObject)
+                    if (hit.collider.gameObject != gameObject && hit.collider.transform.root != transform.root)
                     {
                         bool isVeh = hit.collider.CompareTag("Vehicle") || hit.collider.GetComponentInParent<AIFVehicleAgent>() != null;
                         bool isPed = hit.collider.CompareTag("Pedestrian") || hit.collider.GetComponentInParent<PedestrianAgent>() != null;
 
-                        // Tọa độ tương đối theo chiều ngang của xe
                         Vector3 hitLocal = transform.InverseTransformPoint(hit.point);
 
-                        if (isVeh && Mathf.Abs(hitLocal.x) <= 1.05f && hit.distance < distanceToFront)
+                        if (isVeh)
                         {
-                            distanceToFront = hit.distance;
-                            frontVehicleObj = hit.collider.gameObject;
+                            AIFVehicleAgent hitAgent = hit.collider.GetComponentInParent<AIFVehicleAgent>();
+                            int otherDir = (hitAgent != null) ? hitAgent.drivingDirection : (Vector3.Dot(transform.forward, hit.transform.forward) > 0 ? drivingDirection : -drivingDirection);
+                            bool isSameDir = (otherDir == drivingDirection);
+
+                            if (isSameDir && Mathf.Abs(hitLocal.x) <= inCorridorThreshold && hit.distance < distanceToFront)
+                            {
+                                distanceToFront = hit.distance;
+                                frontVehicleObj = hit.collider.gameObject;
+                            }
+                            else if (!isSameDir)
+                            {
+                                bool isIntrudingOurSide = (hit.point.x * drivingDirection) >= 0.25f;
+
+                                if (isOvertakingOpposite)
+                                {
+                                    if (hit.distance < oppositeClearDist) oppositeClearDist = hit.distance;
+                                    if (Mathf.Abs(hitLocal.x) <= (halfWidth + 0.35f) && hit.distance < distanceToFront)
+                                    {
+                                        distanceToFront = hit.distance;
+                                        frontVehicleObj = hit.collider.gameObject;
+                                    }
+                                }
+                                else if (isIntrudingOurSide && Mathf.Abs(hitLocal.x) <= inCorridorThreshold && hit.distance < distanceToFront)
+                                {
+                                    distanceToFront = hit.distance;
+                                    frontVehicleObj = hit.collider.gameObject;
+                                }
+                            }
                         }
                         else if (isPed && hit.distance < nearestPedDist)
                         {
-                            isPedestrianInPath = true;
-                            nearestPedDist = hit.distance;
-                            nearestPedRelLateral = hitLocal.x;
                             var pAgent = hit.collider.GetComponentInParent<PedestrianAgent>();
-                            if (pAgent != null) nearestPedDir = pAgent.crossingDirection;
+                            int pedDir = (pAgent != null) ? pAgent.crossingDirection : (hitLocal.x > 0 ? -1 : 1);
+                            bool isMovingAway = (hitLocal.x * pedDir) > 1.2f;
+
+                            if (!isMovingAway)
+                            {
+                                isPedestrianInPath = true;
+                                nearestPedDist = hit.distance;
+                                nearestPedRelLateral = hitLocal.x;
+                                if (pAgent != null) nearestPedDir = pAgent.crossingDirection;
+                            }
                         }
                     }
                 }
             }
 
-            // 8 tia chéo đón đầu
+            if (Physics.BoxCast(frontBumperCenter, new Vector3(halfWidth * 0.95f, 0.45f, 0.05f), transform.forward, out RaycastHit boxHit, transform.rotation, 50f))
+            {
+                if (boxHit.collider.gameObject != gameObject && boxHit.collider.transform.root != transform.root)
+                {
+                    bool isVeh = boxHit.collider.CompareTag("Vehicle") || boxHit.collider.GetComponentInParent<AIFVehicleAgent>() != null;
+                    if (isVeh)
+                    {
+                        AIFVehicleAgent hitAgent = boxHit.collider.GetComponentInParent<AIFVehicleAgent>();
+                        int otherDir = (hitAgent != null) ? hitAgent.drivingDirection : (Vector3.Dot(transform.forward, boxHit.transform.forward) > 0 ? drivingDirection : -drivingDirection);
+                        bool isSameDir = (otherDir == drivingDirection);
+                        Vector3 hitLocal = transform.InverseTransformPoint(boxHit.point);
+
+                        if (isSameDir && Mathf.Abs(hitLocal.x) <= inCorridorThreshold && boxHit.distance < distanceToFront)
+                        {
+                            distanceToFront = boxHit.distance;
+                            frontVehicleObj = boxHit.collider.gameObject;
+                        }
+                        else if (!isSameDir && isOvertakingOpposite && boxHit.distance < distanceToFront)
+                        {
+                            distanceToFront = boxHit.distance;
+                            frontVehicleObj = boxHit.collider.gameObject;
+                        }
+                    }
+                }
+            }
+
             bool hasCarOnLeftFrontDiag = false;
             bool hasCarOnRightFrontDiag = false;
 
@@ -347,7 +500,7 @@ namespace TwoLaneSimulation
                 Vector3 diagDir = Quaternion.Euler(0f, diagAngles[d], 0f) * transform.forward;
                 if (Physics.Raycast(frontBumperCenter, diagDir, out RaycastHit diagHit, 30f))
                 {
-                    if (diagHit.collider.gameObject != gameObject)
+                    if (diagHit.collider.gameObject != gameObject && diagHit.collider.transform.root != transform.root)
                     {
                         bool isPed = diagHit.collider.CompareTag("Pedestrian") || diagHit.collider.GetComponentInParent<PedestrianAgent>() != null;
                         bool isVeh = diagHit.collider.CompareTag("Vehicle") || diagHit.collider.GetComponentInParent<AIFVehicleAgent>() != null;
@@ -365,7 +518,9 @@ namespace TwoLaneSimulation
                                 float predictedPedX = diagHit.point.x + (pedDir * pedSpeed * timeToMeet);
                                 float predictedRelX = (predictedPedX - transform.position.x) * drivingDirection;
 
-                                if (Mathf.Abs(predictedRelX) < 2.5f || Mathf.Abs(hitLocal.x) < 2.2f)
+                                bool isMovingAway = (hitLocal.x * pedDir) > 1.2f;
+
+                                if (!isMovingAway && (Mathf.Abs(predictedRelX) < 2.0f || Mathf.Abs(hitLocal.x) < 1.6f))
                                 {
                                     isPedestrianInPath = true;
                                     if (hitLocal.z < nearestPedDist)
@@ -379,43 +534,66 @@ namespace TwoLaneSimulation
                         }
                         else if (isVeh && diagHit.distance < 8.0f)
                         {
-                            if (diagAngles[d] < 0f) hasCarOnLeftFrontDiag = true;
-                            else hasCarOnRightFrontDiag = true;
+                            AIFVehicleAgent hitAgent = diagHit.collider.GetComponentInParent<AIFVehicleAgent>();
+                            int otherDir = (hitAgent != null) ? hitAgent.drivingDirection : (Vector3.Dot(transform.forward, diagHit.transform.forward) > 0 ? drivingDirection : -drivingDirection);
+                            bool isSameDir = (otherDir == drivingDirection);
+
+                            bool isIntrudingOurSide = (diagHit.point.x * drivingDirection) >= 0.25f;
+
+                            if (isSameDir || isOvertakingOpposite || isIntrudingOurSide)
+                            {
+                                if (diagAngles[d] < 0f) hasCarOnLeftFrontDiag = true;
+                                else hasCarOnRightFrontDiag = true;
+                            }
                         }
                     }
                 }
             }
 
-            // Quét sườn xe 2 bên
             float distToCarLeft = 50f;
             float distToCarRight = 50f;
-            float halfWidth = 0.95f;
-            float[] sideOffsets = new float[] { 1.8f, 0.6f, -0.6f, -1.8f };
+            float sideHalfWidth = halfWidth + 0.05f;
+            float[] sideOffsets = new float[] { halfLength * 0.85f, halfLength * 0.30f, -halfLength * 0.30f, -halfLength * 0.85f };
 
             for (int s = 0; s < sideOffsets.Length; s++)
             {
-                Vector3 leftOrigin = carCenter + transform.forward * sideOffsets[s] - transform.right * halfWidth;
+                Vector3 leftOrigin = carCenter + transform.forward * sideOffsets[s] - transform.right * sideHalfWidth;
                 if (Physics.Raycast(leftOrigin, -transform.right, out RaycastHit hitL, sideScanDistance))
                 {
-                    if (hitL.collider.gameObject != gameObject && (hitL.collider.CompareTag("Vehicle") || hitL.collider.GetComponentInParent<AIFVehicleAgent>() != null))
+                    if (hitL.collider.gameObject != gameObject && hitL.collider.transform.root != transform.root && (hitL.collider.CompareTag("Vehicle") || hitL.collider.GetComponentInParent<AIFVehicleAgent>() != null))
                     {
-                        if (hitL.distance < distToCarLeft) distToCarLeft = hitL.distance;
+                        AIFVehicleAgent agentL = hitL.collider.GetComponentInParent<AIFVehicleAgent>();
+                        int dirL = (agentL != null) ? agentL.drivingDirection : (Vector3.Dot(transform.forward, hitL.transform.forward) > 0 ? drivingDirection : -drivingDirection);
+                        bool isSameDirL = (dirL == drivingDirection);
+
+                        bool isIntrudingL = (hitL.point.x * drivingDirection) >= 0.25f;
+                        if (isSameDirL || isOvertakingOpposite || isIntrudingL)
+                        {
+                            if (hitL.distance < distToCarLeft) distToCarLeft = hitL.distance;
+                        }
                     }
                 }
 
-                Vector3 rightOrigin = carCenter + transform.forward * sideOffsets[s] + transform.right * halfWidth;
+                Vector3 rightOrigin = carCenter + transform.forward * sideOffsets[s] + transform.right * sideHalfWidth;
                 if (Physics.Raycast(rightOrigin, transform.right, out RaycastHit hitR, sideScanDistance))
                 {
-                    if (hitR.collider.gameObject != gameObject && (hitR.collider.CompareTag("Vehicle") || hitR.collider.GetComponentInParent<AIFVehicleAgent>() != null))
+                    if (hitR.collider.gameObject != gameObject && hitR.collider.transform.root != transform.root && (hitR.collider.CompareTag("Vehicle") || hitR.collider.GetComponentInParent<AIFVehicleAgent>() != null))
                     {
-                        if (hitR.distance < distToCarRight) distToCarRight = hitR.distance;
+                        AIFVehicleAgent agentR = hitR.collider.GetComponentInParent<AIFVehicleAgent>();
+                        int dirR = (agentR != null) ? agentR.drivingDirection : (Vector3.Dot(transform.forward, hitR.transform.forward) > 0 ? drivingDirection : -drivingDirection);
+                        bool isSameDirR = (dirR == drivingDirection);
+
+                        bool isIntrudingR = (hitR.point.x * drivingDirection) <= -0.25f;
+                        if (isSameDirR || isOvertakingOpposite || isIntrudingR)
+                        {
+                            if (hitR.distance < distToCarRight) distToCarRight = hitR.distance;
+                        }
                     }
                 }
             }
 
-            // Quét hành lang bên trái và phải (trong phạm vi phần đường an toàn của xe)
             float currentPosX = transform.position.x;
-            float lateralCorridorOffset = 2.0f;
+            float lateralCorridorOffset = 4.0f;
             float leftCorridorX = currentPosX - lateralCorridorOffset * drivingDirection;
             float rightCorridorX = currentPosX + lateralCorridorOffset * drivingDirection;
 
@@ -457,7 +635,6 @@ namespace TwoLaneSimulation
                 }
             }
 
-            // Vận tốc và trạng thái xe phía trước
             float leaderSpeed = 0f;
             bool isLeaderStopped = false;
 
@@ -483,73 +660,70 @@ namespace TwoLaneSimulation
 
             isOpenRoadAhead = (distanceToFront >= 16f && !isPedestrianInPath);
 
-            // ===================================================================================
-            // 2. PHÂN TÍCH VẬT CẢN & LỰA CHỌN LÀCH NÉ AN TOÀN TRONG PHẦN ĐƯỜNG RIÊNG
-            // ===================================================================================
-            bool hasPedestrianObstacle = (isPedestrianInPath && nearestPedDist < 26.0f);
+            float oppositeLaneX = -2.0f * drivingDirection;
+            float oppDist = 60f;
+            float[] oppScanOffsets = new float[] { 0f, -0.40f, 0.40f };
+            for (int o = 0; o < oppScanOffsets.Length; o++)
+            {
+                Vector3 oppOrigin = new Vector3(oppositeLaneX + oppScanOffsets[o], fixedHeightY, transform.position.z);
+                if (Physics.Raycast(oppOrigin, transform.forward, out RaycastHit hitOpp, 60f))
+                {
+                    if (hitOpp.collider.gameObject != gameObject)
+                    {
+                        if (hitOpp.distance < oppDist) oppDist = hitOpp.distance;
+                    }
+                }
+            }
+            oppositeClearDist = oppDist;
+            oppositeClearGap = Mathf.Clamp01(oppDist / 50.0f);
+
+            float homeLaneAheadDist = 60f;
+            Vector3 homeOrigin = new Vector3(homeLaneX, fixedHeightY, transform.position.z + transform.forward.z * 2.2f);
+            if (Physics.Raycast(homeOrigin, transform.forward, out RaycastHit hitHome, 45f))
+            {
+                if (hitHome.collider.gameObject != gameObject && hitHome.collider.transform.root != transform.root)
+                {
+                    AIFVehicleAgent homeAgent = hitHome.collider.GetComponentInParent<AIFVehicleAgent>();
+                    int homeDir = (homeAgent != null) ? homeAgent.drivingDirection : (Vector3.Dot(transform.forward, hitHome.transform.forward) > 0 ? drivingDirection : -drivingDirection);
+                    if (homeDir == drivingDirection)
+                    {
+                        homeLaneAheadDist = hitHome.distance;
+                    }
+                }
+            }
+
+            bool isPhysicallyOnOppositeSide = (currentPosX * drivingDirection) < -0.6f;
+            if (isPhysicallyOnOppositeSide && !isChangingLane) isOvertakingOpposite = true;
+
+            bool hasPedestrianObstacle = (isPedestrianInPath && nearestPedDist < 24.0f);
             bool hasStoppedVehicleObstacle = (frontVehicleObj != null && isLeaderStopped && distanceToFront < 18.0f);
             bool hasSlowVehicleObstacle = (frontVehicleObj != null && !isLeaderStopped && distanceToFront < 14.0f && leaderSpeed < effectiveTargetSpeed * 0.70f);
             bool hasObstacleAhead = hasPedestrianObstacle || hasStoppedVehicleObstacle || hasSlowVehicleObstacle;
 
+            float effectiveGap = hasPedestrianObstacle ? nearestPedDist : (frontVehicleObj != null ? distanceToFront : 50f);
+            float relSpeed = hasPedestrianObstacle ? -currentSpeed : (frontVehicleObj != null ? (leaderSpeed - currentSpeed) : 0f);
+
             bool canGoLeft = isLeftCorridorInBounds && (distToCarLeft >= 0.50f) && !hasCarOnLeftFrontDiag && (distLeftLaneAhead > 7.0f) && (distLeftLaneBehind > 5.0f);
             bool canGoRight = isRightCorridorInBounds && (distToCarRight >= 0.50f) && !hasCarOnRightFrontDiag && (distRightLaneAhead > 7.0f) && (distRightLaneBehind > 5.0f);
 
-            if (hasObstacleAhead && !isChangingLane && laneChangeCooldownTimer <= 0f)
+            float chosenShift = 0f;
+            float adjClearDist = 0f;
+            if (canGoRight && canGoLeft)
             {
-                if (hasPedestrianObstacle)
-                {
-                    // Khi người đi bộ ở quá gần: dừng lại nhường đường, giữ hướng đi thẳng
-                    targetLaneX = currentPosX;
-                }
-                else
-                {
-                    // Lách né xe dừng / chạy chậm sang khoảng trống an toàn
-                    if (canGoLeft && canGoRight)
-                    {
-                        float chosenShift = (distLeftLaneAhead >= distRightLaneAhead) ? -lateralCorridorOffset : lateralCorridorOffset;
-                        targetLaneX = Mathf.Clamp(currentPosX + chosenShift * drivingDirection, minSafeX + 0.4f, maxSafeX - 0.4f);
-                        isChangingLane = true;
-                        laneChangeCooldownTimer = 2.0f;
-                    }
-                    else if (canGoLeft)
-                    {
-                        targetLaneX = Mathf.Clamp(currentPosX - lateralCorridorOffset * drivingDirection, minSafeX + 0.4f, maxSafeX - 0.4f);
-                        isChangingLane = true;
-                        laneChangeCooldownTimer = 2.0f;
-                    }
-                    else if (canGoRight)
-                    {
-                        targetLaneX = Mathf.Clamp(currentPosX + lateralCorridorOffset * drivingDirection, minSafeX + 0.4f, maxSafeX - 0.4f);
-                        isChangingLane = true;
-                        laneChangeCooldownTimer = 2.0f;
-                    }
-                }
+                adjClearDist = Mathf.Max(distRightLaneAhead, distLeftLaneAhead);
+                chosenShift = (distRightLaneAhead >= distLeftLaneAhead) ? lateralCorridorOffset : -lateralCorridorOffset;
             }
-            else if (!isChangingLane)
+            else if (canGoRight)
             {
-                targetLaneX = currentPosX;
+                adjClearDist = distRightLaneAhead;
+                chosenShift = lateralCorridorOffset;
             }
-
-            if (isChangingLane)
+            else if (canGoLeft)
             {
-                if (Mathf.Abs(currentPosX - targetLaneX) < 0.25f)
-                {
-                    isChangingLane = false;
-                    targetLaneX = currentPosX;
-                    if (lightsController != null) lightsController.SetTurnSignal(TurnSignal.None);
-                }
-                else if (lightsController != null)
-                {
-                    float lateralDiff = (targetLaneX - currentPosX) * drivingDirection;
-                    lightsController.SetTurnSignal(lateralDiff < 0 ? TurnSignal.Left : TurnSignal.Right);
-                }
+                adjClearDist = distLeftLaneAhead;
+                chosenShift = -lateralCorridorOffset;
             }
-
-            // ===================================================================================
-            // 3. SUY LUẬN AI TỪ MÔ HÌNH SENTIS (.ONNX)
-            // ===================================================================================
-            float effectiveGap = hasPedestrianObstacle ? nearestPedDist : (frontVehicleObj != null ? distanceToFront : 50f);
-            float relSpeed = hasPedestrianObstacle ? -currentSpeed : (frontVehicleObj != null ? (leaderSpeed - currentSpeed) : 0f);
+            float adjacentClearGap = Mathf.Clamp01(adjClearDist / 50.0f);
 
             var (aiSelectedMode, predictedAccel, predictedSteer) = PredictAIPolicy(
                 currentSpeed,
@@ -560,86 +734,333 @@ namespace TwoLaneSimulation
                 distToCarLeft,
                 distToCarRight,
                 isFrontCarBraking,
-                hasPedestrianObstacle
+                hasPedestrianObstacle,
+                oppositeClearGap,
+                isOvertakingOpposite,
+                isChangingLane,
+                adjacentClearGap
             );
 
             currentDrivingMode = aiSelectedMode;
             aiAccelerationOutput = predictedAccel;
             aiSteeringOutput = predictedSteer;
 
+            if (aiSelectedMode == DrivingMode.AbortLaneChange)
+            {
+                currentDrivingMode = DrivingMode.AbortLaneChange;
+                isChangingLane = false;
+                targetLaneX = homeLaneX;
+                laneChangeCooldownTimer = 2.5f;
+                if (lightsController != null) lightsController.SetTurnSignal(TurnSignal.None);
+            }
+            else if (aiSelectedMode == DrivingMode.CreepForward)
+            {
+                currentDrivingMode = DrivingMode.CreepForward;
+                float creepTargetSpeed = Mathf.Clamp(effectiveTargetSpeed * 0.20f, 1.5f, 2.8f);
+                if (currentSpeed < creepTargetSpeed)
+                {
+                    currentSpeed = Mathf.MoveTowards(currentSpeed, creepTargetSpeed, 3.0f * dt);
+                }
+                predictedAccel = Mathf.Max(predictedAccel, 0.45f);
+            }
+            else if (aiSelectedMode == DrivingMode.ActiveEvasion && !isChangingLane && laneChangeCooldownTimer <= 0f)
+            {
+                if (Mathf.Abs(chosenShift) > 0.1f)
+                {
+                    targetLaneX = Mathf.Clamp(currentPosX + chosenShift * drivingDirection, minSafeX + 0.4f, maxSafeX - 0.4f);
+                    isChangingLane = true;
+                    laneChangeCooldownTimer = 2.0f;
+                }
+            }
+
+            bool canOvertakeOpposite = oppositeOvertakeCooldownTimer <= 0f
+                && oppositeClearDist >= 35.0f
+                && distToCarLeft >= 0.55f
+                && !hasCarOnLeftFrontDiag
+                && !hasPedestrianObstacle;
+
+            if (isOvertakingOpposite)
+            {
+                bool hasHazardAheadInOpposite = (oppositeClearDist < 30.0f) || (distanceToFront < 28.0f) || isPedestrianInPath;
+                bool hasPassedTrafficJam = (homeLaneAheadDist > 16.0f) && (distanceToFront > 18.0f);
+
+                if (hasHazardAheadInOpposite || hasPassedTrafficJam || aiSelectedMode == DrivingMode.AbortLaneChange)
+                {
+                    targetLaneX = homeLaneX;
+                    isChangingLane = true;
+                    if (lightsController != null) lightsController.SetTurnSignal(TurnSignal.Right);
+
+                    if ((currentPosX * drivingDirection) > 0.4f)
+                    {
+                        isOvertakingOpposite = false;
+                        if (Mathf.Abs(currentPosX - homeLaneX) < 0.45f)
+                        {
+                            isChangingLane = false;
+                            targetLaneX = homeLaneX;
+                            oppositeOvertakeCooldownTimer = Random.Range(3.5f, 6.0f);
+                            if (lightsController != null) lightsController.SetTurnSignal(TurnSignal.None);
+                        }
+                    }
+                }
+                else
+                {
+                    targetLaneX = oppositeLaneX;
+                    currentDrivingMode = DrivingMode.OppositeOvertake;
+                }
+            }
+            else
+            {
+                if (aiSelectedMode == DrivingMode.OppositeOvertake && canOvertakeOpposite)
+                {
+                    isOvertakingOpposite = true;
+                    isChangingLane = true;
+                    targetLaneX = oppositeLaneX;
+                    laneChangeCooldownTimer = 1.5f;
+                    currentDrivingMode = DrivingMode.OppositeOvertake;
+                    if (lightsController != null) lightsController.SetTurnSignal(TurnSignal.Left);
+                }
+                else if (hasObstacleAhead && !isChangingLane && laneChangeCooldownTimer <= 0f)
+                {
+                    if (hasPedestrianObstacle)
+                    {
+                        targetLaneX = currentPosX;
+                    }
+                    else if (Mathf.Abs(chosenShift) > 0.1f)
+                    {
+                        targetLaneX = Mathf.Clamp(currentPosX + chosenShift * drivingDirection, minSafeX + 0.4f, maxSafeX - 0.4f);
+                        isChangingLane = true;
+                        laneChangeCooldownTimer = 2.0f;
+                    }
+                }
+                else if (!isChangingLane)
+                {
+                    targetLaneX = currentPosX;
+                }
+
+                if (isChangingLane)
+                {
+                    if (Mathf.Abs(currentPosX - targetLaneX) < 0.25f)
+                    {
+                        isChangingLane = false;
+                        targetLaneX = currentPosX;
+                        if (lightsController != null) lightsController.SetTurnSignal(TurnSignal.None);
+                    }
+                    else if (lightsController != null)
+                    {
+                        float lateralDiff = (targetLaneX - currentPosX) * drivingDirection;
+                        lightsController.SetTurnSignal(lateralDiff < 0 ? TurnSignal.Left : TurnSignal.Right);
+                    }
+                }
+            }
+
             float openRoadBoost = (isOpenRoadAhead && hurryFactor > 1.0f) ? (1.0f + (hurryFactor - 1.0f) * 0.7f) : 1.0f;
             float effectiveMaxAccel = maxAcceleration * Mathf.Sqrt(Mathf.Clamp(hurryFactor, 0.6f, 1.6f)) * openRoadBoost;
             float accel = predictedAccel * Mathf.Sqrt(Mathf.Clamp(hurryFactor, 0.7f, 1.4f));
+            float parallelSeparationLateral = 0f;
+
+            if (isOvertakingOpposite && oppositeClearDist > 30f)
+            {
+                accel = Mathf.Max(accel, 1.5f);
+            }
 
             if (currentSpeed >= effectiveTargetSpeed) accel = Mathf.Min(accel, 0f);
 
-            // TẦNG 3: BẢO HIỂM AN TOÀN TUYỆT ĐỐI (SAFETY SUPERVISOR)
-            if (hasPedestrianObstacle && !isChangingLane && nearestPedDist < 4.0f)
-            {
-                currentDrivingMode = DrivingMode.SafeYielding;
-                accel = -crashBrakeDecel;
-                if (lightsController != null) lightsController.SetBraking(true);
-                currentSpeed = Mathf.MoveTowards(currentSpeed, 0f, 20.0f * dt);
-            }
-            else if (frontVehicleObj != null && distanceToFront < 3.2f)
-            {
-                currentDrivingMode = DrivingMode.EmergencyShield;
-                accel = -crashBrakeDecel;
-                if (lightsController != null) lightsController.SetBraking(true);
+            bool vehicleTooCloseAhead = false;
+            float dynamicEmergencyDist = minEmergencyBrakeDistance;
 
-                if (distanceToFront < 2.0f)
+            if (frontVehicleObj != null)
+            {
+                float safetyBuffer = IsMotorcycle ? 1.5f : 2.2f;
+                dynamicEmergencyDist = Mathf.Max(minEmergencyBrakeDistance, (currentSpeed * currentSpeed) / (2f * emergencyBrakeDecel) + safetyBuffer);
+
+                float closingSpeed = currentSpeed - leaderSpeed;
+                bool isTTCImminent = (closingSpeed > 0.6f) && ((distanceToFront / closingSpeed) < 1.0f);
+
+                if (distanceToFront <= dynamicEmergencyDist || isTTCImminent || distanceToFront < 1.8f)
                 {
-                    currentSpeed = Mathf.Min(currentSpeed, leaderSpeed);
-                    if (currentSpeed > 0.2f && leaderSpeed <= 0.1f)
+                    vehicleTooCloseAhead = true;
+                }
+            }
+
+            bool vehicleCuttingInAhead = false;
+            if ((hasCarOnLeftFrontDiag && distToCarLeft < 0.65f) || (hasCarOnRightFrontDiag && distToCarRight < 0.65f))
+            {
+                vehicleCuttingInAhead = true;
+            }
+
+            bool physicalProximityDanger = false;
+            Collider[] bumperHits = Physics.OverlapBox(frontBumperCenter + transform.forward * 0.35f, new Vector3(halfWidth + 0.05f, 0.4f, 0.35f), transform.rotation);
+            for (int i = 0; i < bumperHits.Length; i++)
+            {
+                if (bumperHits[i].gameObject != gameObject && bumperHits[i].transform.root != transform.root)
+                {
+                    if (bumperHits[i].CompareTag("Vehicle") || bumperHits[i].GetComponentInParent<AIFVehicleAgent>() != null)
                     {
-                        currentSpeed = Mathf.MoveTowards(currentSpeed, 0f, 25.0f * dt);
+                        physicalProximityDanger = true;
+                        break;
                     }
                 }
-                else if (currentSpeed > leaderSpeed)
+            }
+
+            bool mustEmergencyBrake = vehicleTooCloseAhead || vehicleCuttingInAhead || physicalProximityDanger;
+
+            if (isOvertakingOpposite && (oppositeClearDist < 18.0f || (isPhysicallyOnOppositeSide && distanceToFront < 16.0f)))
+            {
+                currentDrivingMode = DrivingMode.AbortLaneChange;
+                targetLaneX = homeLaneX;
+                isChangingLane = true;
+                aiSteeringOutput = (homeLaneX - currentPosX) * drivingDirection * 1.5f;
+
+                float returnLateral = Mathf.Sign((homeLaneX - currentPosX) * drivingDirection) * 2.5f;
+                parallelSeparationLateral += returnLateral;
+
+                if (lightsController != null)
                 {
-                    currentSpeed = Mathf.MoveTowards(currentSpeed, leaderSpeed, 18.0f * dt);
+                    lightsController.SetBraking(true);
+                    lightsController.SetTurnSignal(TurnSignal.Right);
                 }
+
+                if (distanceToFront < 1.5f || oppositeClearDist < 1.5f || mustEmergencyBrake)
+                {
+                    isEmergencyBraking = true;
+                    currentDrivingMode = DrivingMode.EmergencyShield;
+                    accel = -emergencyBrakeDecel;
+                    currentSpeed = Mathf.MoveTowards(currentSpeed, 0f, emergencyBrakeDecel * dt);
+                    if (distanceToFront < 0.8f)
+                    {
+                        currentSpeed = 0f;
+                        if (rb != null) rb.linearVelocity = Vector3.zero;
+                    }
+                }
+                else
+                {
+                    float escapeSpeed = Mathf.Clamp(currentSpeed, 3.5f, 6.0f);
+                    currentSpeed = Mathf.MoveTowards(currentSpeed, escapeSpeed, 6.0f * dt);
+                    accel = 0.5f;
+                }
+            }
+            else if (hasPedestrianObstacle && !isChangingLane && nearestPedDist < 3.5f)
+            {
+                isEmergencyBraking = true;
+                currentDrivingMode = DrivingMode.SafeYielding;
+                accel = -emergencyBrakeDecel;
+                if (lightsController != null) lightsController.SetBraking(true);
+                currentSpeed = Mathf.MoveTowards(currentSpeed, 0f, 25.0f * dt);
+                if (nearestPedDist < 1.0f)
+                {
+                    currentSpeed = 0f;
+                    if (rb != null) rb.linearVelocity = Vector3.zero;
+                }
+            }
+            else if (mustEmergencyBrake)
+            {
+                isEmergencyBraking = true;
+                currentDrivingMode = DrivingMode.EmergencyShield;
+                accel = -emergencyBrakeDecel;
+
+                currentSpeed = Mathf.MoveTowards(currentSpeed, 0f, emergencyBrakeDecel * dt);
+
+                if (distanceToFront < 0.9f || physicalProximityDanger)
+                {
+                    currentSpeed = 0f;
+                    if (rb != null)
+                    {
+                        rb.linearVelocity = Vector3.zero;
+                    }
+                }
+
+                if (lightsController != null)
+                {
+                    lightsController.SetBraking(true);
+                }
+            }
+            else if (frontVehicleObj != null && distanceToFront < 16.0f)
+            {
+                isEmergencyBraking = false;
+                currentDrivingMode = DrivingMode.CarFollowing;
+
+                if (currentSpeed > leaderSpeed)
+                {
+                    accel = Mathf.Min(accel, -4.0f);
+                    currentSpeed = Mathf.MoveTowards(currentSpeed, leaderSpeed, 12.0f * dt);
+                }
+                else if (distanceToFront >= 3.5f && leaderSpeed > 0.5f)
+                {
+                    float followTarget = Mathf.Min(leaderSpeed, effectiveTargetSpeed);
+                    currentSpeed = Mathf.MoveTowards(currentSpeed, followTarget, 3.0f * dt);
+                    accel = Mathf.Clamp(accel, -1.0f, 1.2f);
+                }
+                else
+                {
+                    currentSpeed = Mathf.MoveTowards(currentSpeed, leaderSpeed, 10.0f * dt);
+                    accel = Mathf.Min(accel, -2.5f);
+                }
+
+                if (currentSpeed < 0.2f && leaderSpeed < 0.2f)
+                {
+                    currentSpeed = 0f;
+                    if (rb != null) rb.linearVelocity = Vector3.zero;
+                    if (lightsController != null) lightsController.SetBraking(true);
+                }
+            }
+            else
+            {
+                isEmergencyBraking = false;
+            }
+
+            if (isOpenRoadAhead && currentSpeed < 1.5f && !hasPedestrianObstacle && (frontVehicleObj == null || distanceToFront > 10f))
+            {
+                accel = Mathf.Max(accel, 1.8f);
+            }
+
+            if (postVehicleCollisionGraceTimer > 2.2f && (frontVehicleObj == null || distanceToFront > dynamicEmergencyDist + 1.0f))
+            {
+                if (currentSpeed < 2.5f) currentSpeed = 2.5f;
             }
 
             float throttle = Mathf.Clamp(accel / Mathf.Max(1f, effectiveMaxAccel), -1f, 1f);
             currentSpeed = Mathf.Clamp(currentSpeed + accel * dt, 0f, effectiveTargetSpeed * 1.15f);
 
-            // ===================================================================================
-            // 4. ĐIỀU KHIỂN ĐÁNH LÁI KHÔNG GIAN LIÊN TỤC & TÁCH NHAU RA
-            // ===================================================================================
             float lateralOffset = (targetLaneX - currentPosX) * drivingDirection;
             float steering = 0f;
-            float parallelSeparationLateral = 0f;
 
             if (distToCarRight < 0.50f)
             {
                 float urgency = (0.50f - distToCarRight) / 0.50f;
                 steering = -urgency * 0.45f;
-                parallelSeparationLateral = -urgency * 1.5f;
+                parallelSeparationLateral += -urgency * 1.5f;
             }
             else if (distToCarLeft < 0.50f)
             {
                 float urgency = (0.50f - distToCarLeft) / 0.50f;
                 steering = urgency * 0.45f;
-                parallelSeparationLateral = urgency * 1.5f;
+                parallelSeparationLateral += urgency * 1.5f;
             }
-            else if (isChangingLane)
+            else if (isOvertakingOpposite || isChangingLane)
             {
-                steering = Mathf.Clamp(lateralOffset * 0.80f + aiSteeringOutput * 0.40f, -0.65f, 0.65f);
+                float maxSteerLimit = isOvertakingOpposite ? (IsMotorcycle ? 0.95f : 0.80f) : (IsMotorcycle ? 0.85f : 0.65f);
+                float steerGain = IsMotorcycle ? 0.55f : 0.40f;
+                steering = Mathf.Clamp(lateralOffset * 0.80f + aiSteeringOutput * steerGain, -maxSteerLimit, maxSteerLimit);
+            }
+            else if (currentDrivingMode == DrivingMode.AbortLaneChange)
+            {
+                steering = Mathf.Clamp(aiSteeringOutput * 0.70f + lateralOffset * 0.50f, -0.60f, 0.60f);
             }
             else
             {
-                steering = Mathf.Clamp(aiSteeringOutput * 0.35f, -0.20f, 0.20f);
+                float steerGain = IsMotorcycle ? 0.50f : 0.35f;
+                steering = Mathf.Clamp(aiSteeringOutput * steerGain + lateralOffset * 0.20f, -0.30f, 0.30f);
                 if (Mathf.Abs(steering) < 0.02f) steering = 0f;
             }
 
-            smoothedSteering = Mathf.Lerp(smoothedSteering, steering, 12.0f * dt);
+            float steerSmoothSpeed = IsMotorcycle ? 18.0f : 12.0f;
+            smoothedSteering = Mathf.Lerp(smoothedSteering, steering, steerSmoothSpeed * dt);
             steering = smoothedSteering;
 
-            // Xoay hướng xe quanh góc chuẩn baseYaw (0 độ hoặc 180 độ)
             float currentYaw = transform.eulerAngles.y;
             float desiredYaw = baseYaw + Mathf.Clamp(steering * maxHeadingAngle, -maxHeadingAngle, maxHeadingAngle);
-            float newYaw = Mathf.MoveTowardsAngle(currentYaw, desiredYaw, 45f * dt);
+            float turnSpeed = IsMotorcycle ? 65f : 45f;
+            float newYaw = Mathf.MoveTowardsAngle(currentYaw, desiredYaw, turnSpeed * dt);
 
             Quaternion safeRot = Quaternion.Euler(0f, newYaw, 0f);
             transform.rotation = safeRot;
@@ -649,7 +1070,6 @@ namespace TwoLaneSimulation
                 rb.angularVelocity = Vector3.zero;
             }
 
-            // Vận tốc chuyển động
             Vector3 targetVelocity = transform.forward * currentSpeed;
             targetVelocity.y = 0f;
 
@@ -658,7 +1078,6 @@ namespace TwoLaneSimulation
                 targetVelocity += transform.right * parallelSeparationLateral;
             }
 
-            // Áp dụng lực tách va chạm
             if (vehicleCollisionTimer > 0f) vehicleCollisionTimer -= dt;
             else { isCollidingWithVehicle = false; vehicleSeparationVector = Vector3.zero; }
 
@@ -676,29 +1095,41 @@ namespace TwoLaneSimulation
 
             rb.linearVelocity = targetVelocity;
 
-            // Khống chế cao độ Y và giới hạn biên an toàn phần đường
             Vector3 curPos = rb.position;
             curPos.y = fixedHeightY;
-            curPos.x = Mathf.Clamp(curPos.x, minSafeX, maxSafeX);
+
+            float effectiveMinX = minSafeX;
+            float effectiveMaxX = maxSafeX;
+            if (drivingDirection == 1)
+            {
+                if (isOvertakingOpposite || curPos.x < minSafeX) effectiveMinX = -3.6f;
+            }
+            else
+            {
+                if (isOvertakingOpposite || curPos.x > maxSafeX) effectiveMaxX = 3.6f;
+            }
+            curPos.x = Mathf.Clamp(curPos.x, effectiveMinX, effectiveMaxX);
             rb.position = curPos;
 
-            // Hệ thống đèn
             if (lightsController != null)
             {
-                bool isBrakingNow = (throttle < -0.05f) || (distanceToFront < 6f && currentSpeed > 0.5f) || (collisionVisualizer != null && collisionVisualizer.IsInCrashState);
+                bool isBrakingNow = isEmergencyBraking || (throttle < -0.05f) || (distanceToFront < 6f && currentSpeed > 0.5f) || (collisionVisualizer != null && collisionVisualizer.IsInCrashState);
                 lightsController.SetBraking(isBrakingNow);
             }
 
-            // Vòng lặp tuần hoàn đoạn đường 500m
             if (drivingDirection == 1 && transform.position.z >= 490f)
             {
-                transform.position = new Vector3(targetLaneX, fixedHeightY, 10f);
+                isOvertakingOpposite = false;
+                targetLaneX = homeLaneX;
+                transform.position = new Vector3(homeLaneX, fixedHeightY, 10f);
                 currentSpeed = 6f;
                 rb.linearVelocity = transform.forward * 6f;
             }
             else if (drivingDirection == -1 && transform.position.z <= 10f)
             {
-                transform.position = new Vector3(targetLaneX, fixedHeightY, 490f);
+                isOvertakingOpposite = false;
+                targetLaneX = homeLaneX;
+                transform.position = new Vector3(homeLaneX, fixedHeightY, 490f);
                 currentSpeed = 6f;
                 rb.linearVelocity = transform.forward * 6f;
             }
@@ -706,7 +1137,6 @@ namespace TwoLaneSimulation
 
         void LateUpdate()
         {
-            // Bảo hiểm góc quay luôn trong phạm vi cho phép quanh baseYaw
             float yaw = transform.eulerAngles.y;
             float relAngle = Mathf.DeltaAngle(baseYaw, yaw);
             if (Mathf.Abs(relAngle) > maxHeadingAngle)
@@ -746,17 +1176,17 @@ namespace TwoLaneSimulation
 
             if (other.CompareTag("Pedestrian") || other.GetComponentInParent<PedestrianAgent>() != null)
             {
-                pedestrianCollisionPauseTimer = 3.5f;
+                pedestrianCollisionPauseTimer = 1.2f;
                 currentSpeed = 0f;
                 if (rb != null) rb.linearVelocity = Vector3.zero;
                 if (lightsController != null) lightsController.SetBraking(true);
-                if (collisionVisualizer != null) collisionVisualizer.TriggerCrash(3.5f);
+                if (collisionVisualizer != null) collisionVisualizer.TriggerCrash(1.5f);
 
                 IgnoreCollisionWithObject(other, 6.0f);
                 var pedAgent = other.GetComponentInParent<PedestrianAgent>();
                 if (pedAgent != null)
                 {
-                    pedAgent.TriggerCrash(3.5f, gameObject);
+                    pedAgent.TriggerCrash(1.2f, gameObject);
                     pedAgent.IgnoreCollisionWithVehicle(gameObject, 6.0f);
                 }
                 return;
@@ -764,13 +1194,79 @@ namespace TwoLaneSimulation
 
             if (other.CompareTag("Vehicle") || other.GetComponentInParent<AIFVehicleAgent>() != null)
             {
-                isCollidingWithVehicle = true;
-                vehicleCollisionTimer = 0.2f;
-                if (collisionVisualizer != null) collisionVisualizer.TriggerCrash(3.0f);
+                isCollidingWithVehicle = false;
+                vehicleSeparationVector = Vector3.zero;
 
-                Vector3 diff = transform.position - other.transform.position;
-                diff.y = 0f;
-                vehicleSeparationVector = diff.normalized;
+                var otherAgent = other.GetComponentInParent<AIFVehicleAgent>();
+
+                Vector3 separateDir = Vector3.zero;
+                float penDepth = 0f;
+
+                if (collision.contactCount > 0)
+                {
+                    ContactPoint contact = collision.GetContact(0);
+                    separateDir = contact.normal;
+                    separateDir.y = 0f;
+                    if (contact.separation < 0f) penDepth = -contact.separation;
+                }
+
+                if (separateDir.sqrMagnitude < 0.01f)
+                {
+                    Vector3 diff = transform.position - other.transform.position;
+                    diff.y = 0f;
+                    separateDir = (diff.sqrMagnitude > 0.01f) ? diff.normalized : -transform.forward;
+                }
+                separateDir.Normalize();
+
+                float bouncePerCar = 0.25f;
+                float totalShift = (penDepth * 0.5f) + bouncePerCar;
+                Vector3 pushOut = separateDir * totalShift;
+
+                transform.position += pushOut;
+                if (rb != null)
+                {
+                    Vector3 p = transform.position;
+                    p.y = fixedHeightY;
+                    p.x = Mathf.Clamp(p.x, minSafeX - 1.2f, maxSafeX + 1.2f);
+                    rb.position = p;
+                }
+
+                if (otherAgent != null)
+                {
+                    otherAgent.transform.position -= pushOut;
+                    if (otherAgent.rb != null)
+                    {
+                        Vector3 op = otherAgent.transform.position;
+                        op.y = otherAgent.fixedHeightY;
+                        op.x = Mathf.Clamp(op.x, otherAgent.minSafeX - 1.2f, otherAgent.maxSafeX + 1.2f);
+                        otherAgent.rb.position = op;
+                    }
+
+                    if (isOvertakingOpposite)
+                    {
+                        targetLaneX = homeLaneX;
+                        isChangingLane = true;
+                        oppositeOvertakeCooldownTimer = 4.0f;
+                    }
+                    if (otherAgent.isOvertakingOpposite)
+                    {
+                        otherAgent.targetLaneX = otherAgent.homeLaneX;
+                        otherAgent.isChangingLane = true;
+                        otherAgent.oppositeOvertakeCooldownTimer = 4.0f;
+                    }
+                }
+
+                if (postVehicleCollisionGraceTimer > 0f) return;
+
+                float crashDuration = (vehicleCrashStopDuration > 0f) ? vehicleCrashStopDuration : 2.0f;
+
+                TriggerVehicleCrash(crashDuration);
+
+                if (otherAgent != null)
+                {
+                    otherAgent.TriggerVehicleCrash(crashDuration);
+                }
+
                 return;
             }
 
@@ -786,6 +1282,25 @@ namespace TwoLaneSimulation
                 float curbRepelDir = (transform.position.x > roadSectionCenter) ? -1f : 1f;
                 barrierSeparationVector = new Vector3(curbRepelDir, 0f, 0f);
             }
+        }
+
+        public void TriggerVehicleCrash(float duration = 2.0f)
+        {
+            vehicleCrashPauseTimer = (duration > 0f) ? duration : 2.0f;
+            currentSpeed = 0f;
+            if (rb != null)
+            {
+                rb.linearVelocity = Vector3.zero;
+                rb.angularVelocity = Vector3.zero;
+                Vector3 p = rb.position;
+                p.y = fixedHeightY;
+                rb.position = p;
+                rb.rotation = Quaternion.Euler(0f, transform.eulerAngles.y, 0f);
+            }
+            isCollidingWithVehicle = false;
+            vehicleSeparationVector = Vector3.zero;
+            if (lightsController != null) lightsController.SetBraking(true);
+            if (collisionVisualizer != null) collisionVisualizer.TriggerCrash(duration > 0f ? duration : 2.0f);
         }
 
         public void IgnoreCollisionWithObject(GameObject otherObj, float duration)
